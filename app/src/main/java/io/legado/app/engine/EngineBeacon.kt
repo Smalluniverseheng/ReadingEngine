@@ -41,15 +41,14 @@ object EngineBeacon {
     private val prefs get() = appCtx.getSharedPreferences("reading_engine", Context.MODE_PRIVATE)
 
     /** THP/1.0 实例标识(持久化, 供前端去重/BYE) */
-    private val instanceId: String
-        get() {
-            var id = prefs.getString("instance_id", "") ?: ""
-            if (id.isEmpty()) {
-                id = "eng-" + java.util.UUID.randomUUID().toString().replace("-", "").take(12)
-                prefs.edit().putString("instance_id", id).apply()
-            }
-            return id
+    fun instanceId(): String {
+        var id = prefs.getString("instance_id", "") ?: ""
+        if (id.isEmpty()) {
+            id = "eng-" + java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+            prefs.edit().putString("instance_id", id).apply()
         }
+        return id
+    }
 
     /** 应用启动 / 开机自启时调用 */
     fun start() {
@@ -66,7 +65,7 @@ object EngineBeacon {
                 val sock = DatagramSocket()
                 sock.broadcast = true
                 val addr = InetAddress.getByName("255.255.255.255")
-                val payload = "THP/1 HELLO ${ThpServer.PORT} $instanceId engine $CAPS $NAME".toByteArray()
+                val payload = "THP/1 HELLO ${ThpServer.PORT} ${instanceId()} engine $CAPS $NAME".toByteArray()
                 while (true) {
                     runCatching { sock.send(DatagramPacket(payload, payload.size, addr, BEACON_PORT)) }
                     delay(BROADCAST_INTERVAL_MS)

@@ -21,18 +21,31 @@
 
 ## 协议（THP/1）
 
-引擎在局域网内提供 HTTP 服务，端口 `1234`，端点均为 `GET`、无鉴权：
+引擎在局域网内提供 HTTP 服务，端口 `1234`，无鉴权。
+
+### THP/1 规范端点（推荐）
+
+`module` ∈ `novel` / `comic` / `music` / `video`。响应统一为 `{ok:true, data:…}`，出错为
+`{ok:false, error:{code, message}}`。
+
+| 端点 | 参数 | data |
+| --- | --- | --- |
+| `GET /thp/meta` | — | `{protocol, instanceId, role, name, version, caps, auth, endpoints, …}` |
+| `POST /thp/m/{module}/search` | `{q, limit, cursor}` | `[{id, name, author, coverUrl, intro, ref}]` |
+| `POST /thp/m/{module}/toc` | `{id, cursor}` | `[{id, name, index}]` |
+| `POST /thp/m/{module}/content` | `{id, chapterId}` | novel→`{text}` · comic→`{images:[]}` · music/video→`{url, header, variants}` |
+
+以上三个也可用 `GET` 版调用：`?q=` / `?id=` / `?id=&chapterId=`。
+
+### 兼容端点（旧草稿，保留以支持老客户端）
 
 | 端点 | 说明 |
 | --- | --- |
-| `/thp/meta` | 引擎名片：名称 / 能力 / 版本 / 鉴权方式 |
-| `/thp/search?type=novel&q=关键词` | 全源并发搜索 |
-| `/thp/chapters?type=novel&id=书URL` | 目录 |
-| `/thp/content?type=novel&id=书URL&chapter=章节URL` | 正文 |
-| `/thp/discover?type=novel` | 发现页：按书源分组返回分类标签 |
-| `/thp/explore?type=novel&source=源URL&url=分类URL&page=1` | 发现列表 |
-
-`type` 取值：`novel` / `comic` / `music` / `video`。
+| `GET /thp/search?type=novel&q=关键词` | 全源并发搜索 |
+| `GET /thp/chapters?type=novel&id=书URL` | 目录 |
+| `GET /thp/content?type=novel&id=书URL&chapter=章节URL` | 正文 |
+| `GET /thp/discover?type=novel` | 发现页：按书源分组返回分类标签 |
+| `GET /thp/explore?type=novel&source=源URL&url=分类URL&page=1` | 发现列表 |
 
 自动发现：引擎每 5 秒向 UDP `19527` 广播一次
 

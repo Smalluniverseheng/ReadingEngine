@@ -22,9 +22,13 @@ static def releaseTime() {
 
 def name = "reading-engine"
 // 阅读引擎自有版本线, 与上游 Legado 版本号解耦
-def version = "1.4.0"
-// versionCode 保持单调递增, 保证覆盖安装不触发降级拦截
-def versionCodeValue = 38000
+def version = "1.5.0"
+// versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
+// 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
+def versionCodeValue = {
+    def p = version.split('\\.')
+    (Integer.parseInt(p[0]) * 10000) + (Integer.parseInt(p[1]) * 100) + Integer.parseInt(p[2])
+}()
 def armOnly = project.findProperty("armOnly")?.toBoolean() ?: false
 
 android {

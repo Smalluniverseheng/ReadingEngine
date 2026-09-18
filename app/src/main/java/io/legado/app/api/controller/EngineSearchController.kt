@@ -40,10 +40,12 @@ object EngineSearchController {
             model.search(System.currentTimeMillis(), key)
             done.await(25, TimeUnit.SECONDS)
             runCatching { model.close() }
-            // 附带书源类型, 方便后端按模块路由(0小说 1音频 2漫画)
-            // 注意: SearchBook.type 是 BookType 位标志(text=8/audio=32/image=64), 需归一化为 0/1/2
+            // 附带书源类型, 方便后端按模块路由(0小说 1音频 2漫画 4视频)
+            // 注意: SearchBook.type 是 BookType 位标志(video=4/text=8/audio=32/image=64), 需归一化为 0/1/2/4
+            // 视频位最具体(旧版 legado 曾用 4 表示视频), 优先判定, 否则视频源会被归成 0 小说 → 视频模块永远空
             val list = results.map { b ->
                 val st = when {
+                    b.type and BookType.video != 0 -> 4
                     b.type and BookType.image != 0 -> 2
                     b.type and BookType.audio != 0 -> 1
                     else -> 0
@@ -53,7 +55,10 @@ object EngineSearchController {
                     "kind" to (b.kind ?: ""), "coverUrl" to (b.coverUrl ?: ""),
                     "intro" to (b.intro ?: ""), "bookUrl" to b.bookUrl,
                     "origin" to b.origin, "originName" to b.originName,
-                    "sourceType" to st, "typeName" to when (st) { 0 -> "text"; 1 -> "audio"; 2 -> "image"; else -> "unknown" }
+                    "sourceType" to st,
+                    "typeName" to when (st) {
+                        0 -> "text"; 1 -> "audio"; 2 -> "image"; 4 -> "video"; else -> "unknown"
+                    }
                 )
             }
             ReturnData().setData(list)

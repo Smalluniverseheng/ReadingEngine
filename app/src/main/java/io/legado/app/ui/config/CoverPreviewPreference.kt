@@ -16,10 +16,10 @@ class CoverPreviewPreference(context: Context, attrs: AttributeSet?) : Preferenc
     override fun onBindViewHolder(holder: PreferenceViewHolder) {
         super.onBindViewHolder(holder)
         (holder.findViewById(R.id.cover_preview_short) as CoverImageView).load(
-            name = "开源阅读", author = "开源阅读LegadoTeam",
+            name = "阅读引擎", author = "本地书源",
         )
         (holder.findViewById(R.id.cover_preview_long) as CoverImageView).load(
-            name = "开源阅读可以看小说、看漫画、听书", author = "开源阅读",
+            name = "阅读引擎支持小说、漫画、听书与视频", author = "本地书源",
         )
     }
 

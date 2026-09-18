@@ -109,9 +109,7 @@
     <string name="about_description">
         \u3000\u3000这是一款使用 Kotlin 全新开发的开源的阅读软件，欢迎您的加入。
     </string>
-    <string name="app_share_description">
-        阅读 3.0 下载地址：\nhttps://github.com/LegadoTeam/legado/releases
-    </string>
+    <string name="app_share_description">阅读引擎 —— 局域网内即插即用的本地书源解析引擎。</string>
     <string name="version_name">版本 %s</string>
     <string name="pt_background_verification">后台校验书源</string>
     <string name="ps_background_verification">打开后可以在校验书源时自由操作</string>
@@ -241,6 +239,7 @@
     <string name="check_update">检查更新</string>
     <string name="check_beta_update">检查测试版更新</string>
     <string name="check_beta_update_failed">检查测试版更新失败</string>
+    <string name="local_engine_update_disabled">本引擎为纯本地软件，不含在线更新通道；更新请重新获取安装包。</string>
     <string name="beta_update_unsupported">当前安装包不能直接升级测试版，仅支持 beta 签名的 release 或 releaseA 安装包</string>
     <string name="beta_update_no_compatible_apk">发现新版测试版，但没有适用于当前设备的安装包</string>
     <string name="latest_beta_version">已是最新测试版</string>

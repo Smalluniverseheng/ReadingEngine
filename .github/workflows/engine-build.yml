@@ -62,7 +62,37 @@ jobs:
           OUT="reading-engine-${{ steps.ver.outputs.version }}.apk"
           cp "$APK" "$OUT"
           echo "name=$OUT" >> "$GITHUB_OUTPUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
           ls -la "$OUT"
+
+      - name: 校验产物
+        run: |
+          set -e
+          APK="${{ steps.apk.outputs.path }}"
+          WANT="${{ steps.ver.outputs.version }}"
+          # 与 app/build.gradle 的推导规则保持一致: major*10000 + minor*100 + patch
+          EXPECT_VCODE=$(echo "$WANT" | awk -F. '{printf "%d", $1*10000 + $2*100 + $3}')
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT | 期望 versionName=$WANT versionCode=$EXPECT_VCODE"
+
+          BADGING=$("$BT/aapt2" dump badging "$APK" 2>/dev/null | head -1)
+          echo "$BADGING"
+          # 1) 版本号必须与 build.gradle 一致(防静默回落)
+          echo "$BADGING" | grep -q "versionName='$WANT'" \
+            || { echo "::error::versionName 不符, 期望 $WANT"; exit 1; }
+          VCODE=$(echo "$BADGING" | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p")
+          [ "$VCODE" = "$EXPECT_VCODE" ] \
+            || { echo "::error::versionCode 不符, 实际 $VCODE 期望 $EXPECT_VCODE"; exit 1; }
+
+          # 2) 必须已签名, 且证书是本仓库密钥(不是上游公开密钥)
+          "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
+          grep -q "CN=Reading Engine" /tmp/certs.txt \
+            || { echo "::error::签名证书不是本仓库密钥, 疑似用了上游公开密钥"; exit 1; }
+
+          # 3) 关键组件齐全
+          "$BADGING" | grep -q "package: name='com.legado.app" || { echo "::error::applicationId 异常"; exit 1; }
+          "$BT/aapt2" dump badging "$APK" | grep -q "native-code" || { echo "::error::缺 native-code"; exit 1; }
+          echo "★ 产物校验通过"
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
@@ -72,8 +102,9 @@ jobs:
           body: |
             阅读引擎 ${{ steps.ver.outputs.version }}
 
-            - 本地书源解析引擎, 局域网内即插即用
-            - 支持小说 / 漫画 / 听书
-            - 无需账号, 不连接任何云端服务
+            - 本地书源解析引擎，局域网内即插即用
+            - 支持小说 / 漫画 / 听书 / 视频
+            - 无需账号，不连接任何云端服务
+            - THP/1 规范端点：`/thp/meta`、`/thp/m/{module}/search|toc|content`
           files: ${{ steps.apk.outputs.name }}
           draft: false

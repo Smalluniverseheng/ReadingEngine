@@ -1,16 +1,18 @@
 package io.legado.app.engine
 
 import fi.iki.elonen.NanoHTTPD
-import io.legado.app.api.ReturnData
 import io.legado.app.api.controller.BookController
 import io.legado.app.api.controller.EngineSearchController
 import io.legado.app.constant.BookType
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
+import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.savePreservingCustomCoverUrl
 import io.legado.app.help.source.exploreKinds
+import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.webBook.WebBook
-import io.legado.app.utils.GSON
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -18,25 +20,44 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 本地阅读引擎服务端: 供局域网内的阅读前端按统一协议直接调用本引擎
- * 端口 1234(与 UDP HELLO 广播一致), 仅在局域网内监听, 无账号鉴权
+ * 本地阅读引擎服务端 —— 局域网内的阅读前端按 THP/1 协议直接调用本引擎。
  *
- * 端点(THP v1):
- *   GET /thp/meta                        → 引擎名片(name/caps/version/auth)
- *   GET /thp/search?type=novel&q=关键词   → {data:{items:[{id,name,author,coverUrl,intro,kind}]}}
- *   GET /thp/chapters?type=novel&id=书URL → {data:{items:[{name,url,index}]}}
- *   GET /thp/content?type=novel&id=书URL&chapter=章节URL → {data:{text}}
- *   GET /thp/discover?type=novel         → {data:{items:[{source,sourceName,tags:[{name,url}]}]}}
- *   GET /thp/explore?type=novel&source=源URL&url=分类URL&page=1 → 同 search 的书籍条目
- * 说明: 搜索/目录/正文/发现全部委托 Legado 本体(EngineSearchController/BookController/WebBook),
- *       规则解析 100% 由 Legado 引擎本体完成, 本层只做协议转换。
+ * 端口 1234, 仅局域网监听, 无账号鉴权。
+ *
+ * 规范端点(THP/1.0 §6/§7.3, 推荐, 前端优先走这条):
+ *   GET  /thp/meta                            → {ok:true,data:{protocol,role,caps,…}}
+ *   POST /thp/m/{module}/search               → {ok:true,data:[{id,name,author,coverUrl,intro,ref}]}
+ *   POST /thp/m/{module}/toc                  → {ok:true,data:[{id,name,index}]}
+ *   POST /thp/m/{module}/content              → {ok:true,data:{…}}  形状按模块:
+ *          novel→{text}  comic→{images:[…]}  music→{url,variants}  video→{url,header,variants}
+ *   (以上三个同时支持 GET 版: ?q= / ?id= / ?id=&chapterId=)
+ *   module ∈ novel | comic | music | video
+ *
+ * 兼容端点(旧草稿, 保留以支持老客户端):
+ *   GET /thp/search?type=novel&q=…            → {object:"list",data:{items:[…]}}
+ *   GET /thp/chapters?type=…&id=…             → 同上
+ *   GET /thp/content?type=…&id=…&chapter=…    → {object:"novel-content",data:{text}}
+ *   GET /thp/discover?type=…                  → 发现页: 各书源的分类标签
+ *   GET /thp/explore?type=…&source=…&url=…&page=… → 发现列表
+ *
+ * 搜索/目录/正文全部委托 Legado 本体(EngineSearchController / BookController / WebBook),
+ * 规则解析 100% 由引擎完成, 本层只做协议转换。
  */
 class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     companion object {
         const val PORT = 1234
-        const val VERSION = "engine-1.4.0"
+        const val VERSION = "1.5.0"
+        const val PROTOCOL = "THP/1.0"
         private var instance: ThpServer? = null
+
+        /** 模块名 → legado 书源类型(THP §6.1) */
+        private val MODULES = mapOf(
+            "novel" to 0,   // text
+            "music" to 1,   // audio
+            "comic" to 2,   // image
+            "video" to 4,   // video
+        )
 
         @Synchronized
         fun ensureStarted() {
@@ -53,28 +74,48 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         }
     }
 
-    // 搜索结果缓存: bookUrl → 搜索结果字段(目录阶段需要 origin 等信息补入库)
+    /** 搜索结果缓存: bookUrl → 归一化字段(目录阶段据此补登入库) */
     private val searchCache = ConcurrentHashMap<String, Map<String, Any?>>()
 
+    private val instanceId: String by lazy { EngineBeacon.instanceId() }
+
+    // ─────────────────────────── 路由 ───────────────────────────
+
     override fun serve(session: IHTTPSession): Response {
-        val uri = session.uri
-        if (!uri.startsWith("/thp/")) return json(404, err("not_found", "未知端点"))
+        val uri = session.uri ?: return json(400, err("invalid_request", "缺 uri"))
+        if (!uri.startsWith("/thp")) return json(404, err("not_found", "未知端点"))
+
+        // 取参: POST 走 JSON body, 否则走 query
+        val q = session.parms ?: emptyMap()
+        val body: JSONObject? = if (session.method == Method.POST) readJsonBody(session) else null
+        val get: (String) -> String? = { k -> body?.optString(k)?.takeIf { it.isNotEmpty() } ?: q[k] }
+
         return try {
             when {
-                uri == "/thp/meta" -> json(200, JSONObject()
-                    .put("object", "meta")
-                    .put("data", JSONObject()
-                        .put("name", "阅读引擎")
-                        .put("role", "engine")
-                        .put("version", VERSION)
-                        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video"))
-                        .put("auth", JSONArray().put("none"))))
-                uri == "/thp/search" -> search(session.parms)
-                uri == "/thp/chapters" -> chapters(session.parms)
-                uri == "/thp/content" -> content(session.parms)
-                // NanoHTTPD parms 是单值 Map, 控制器要 List<String> — 在各 handler 里转
-                uri == "/thp/discover" -> discover(session.parms)
-                uri == "/thp/explore" -> explore(session.parms)
+                uri == "/thp/meta" -> meta()
+
+                // ── 规范端点 /thp/m/{module}/{op} ──
+                REGEX_MODULE.matches(uri) -> {
+                    val m = REGEX_MODULE.find(uri)!!
+                    val module = m.groupValues[1]
+                    val op = m.groupValues[2]
+                    if (!MODULES.containsKey(module)) {
+                        json(404, errSpec("NOT_FOUND", "未注册的模块: $module"))
+                    } else when (op) {
+                        "search" -> specSearch(module, get)
+                        "toc" -> specToc(module, get)
+                        "content" -> specContent(module, get)
+                        else -> json(404, errSpec("UNSUPPORTED", "模块 $module 不支持 $op"))
+                    }
+                }
+
+                // ── 兼容端点(旧草稿) ──
+                uri == "/thp/search" -> search(q)
+                uri == "/thp/chapters" -> chapters(q)
+                uri == "/thp/content" -> legacyContent(q)
+                uri == "/thp/discover" -> discover(q)
+                uri == "/thp/explore" -> explore(q)
+
                 else -> json(404, err("not_found", "未知端点"))
             }
         } catch (e: Exception) {
@@ -82,13 +123,128 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         }
     }
 
-    // ── 搜索: 复用 EngineSearchController(官方 SearchModel 全量书源并发) ──
+    // ─────────────────────────── 规范端点 ───────────────────────────
+
+    private fun meta(): Response = json(200, okSpec(JSONObject()
+        .put("protocol", PROTOCOL)
+        .put("instanceId", instanceId)
+        .put("role", "engine")
+        .put("name", EngineBeacon.NAME)
+        .put("version", VERSION)
+        .put("vendor", "reading-engine")
+        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video"))
+        .put("auth", JSONArray().put("none"))
+        .put("remote", false)
+        .put("endpoints", JSONArray().put("search").put("toc").put("content"))
+        .put("deprecated", JSONArray())
+        .put("ext", JSONObject())))
+
+    private fun specSearch(module: String, get: (String) -> String?): Response {
+        val q = (get("q") ?: get("key"))?.trim()
+        if (q.isNullOrEmpty()) return json(400, errSpec("INVALID_REQUEST", "缺参数 q"))
+        val limit = get("limit")?.toIntOrNull() ?: 50
+        val rd = EngineSearchController.search(mapOf("key" to listOf(q)))
+        if (!rd.isSuccess) return json(502, errSpec("UPSTREAM_ERROR", rd.errorMsg ?: "搜索失败"))
+        @Suppress("UNCHECKED_CAST")
+        val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
+        val arr = JSONArray()
+        var n = 0
+        for (b in raw) {
+            if (n >= limit) break
+            val st = (b["sourceType"] as? Int) ?: 0
+            if (st != MODULES[module]) continue
+            val bookUrl = (b["bookUrl"] as? String) ?: continue
+            cachePut(bookUrl, b)
+            arr.put(JSONObject()
+                .put("id", bookUrl)
+                .put("name", b["name"] ?: "")
+                .put("author", b["author"] ?: "")
+                .put("coverUrl", b["coverUrl"] ?: "")
+                .put("intro", (b["intro"] as? String ?: "").take(200))
+                .put("ref", bookUrl))
+            n++
+        }
+        return json(200, okSpec(arr))
+    }
+
+    private fun specToc(module: String, get: (String) -> String?): Response {
+        val id = get("id")
+        if (id.isNullOrBlank()) return json(400, errSpec("INVALID_REQUEST", "缺参数 id"))
+        val list = loadToc(id) ?: return json(502, errSpec("UPSTREAM_ERROR", "目录获取失败"))
+        val arr = JSONArray()
+        for (c in list) {
+            arr.put(JSONObject()
+                .put("id", c.url)
+                .put("name", c.title)
+                .put("index", c.index))
+        }
+        return json(200, okSpec(arr))
+    }
+
+    private fun specContent(module: String, get: (String) -> String?): Response {
+        val id = get("id")
+        if (id.isNullOrBlank()) return json(400, errSpec("INVALID_REQUEST", "缺参数 id"))
+        // 规范用 chapterId, 兼容 chapter
+        val chapterRef = get("chapterId") ?: get("chapter")
+        if (chapterRef.isNullOrBlank()) return json(400, errSpec("INVALID_REQUEST", "缺参数 chapterId"))
+        val index = resolveChapterIndex(id, chapterRef)
+            ?: return json(404, errSpec("NOT_FOUND", "章节不存在"))
+
+        return when (module) {
+            "novel" -> {
+                val rd = BookController.getBookContent(
+                    mapOf("url" to listOf(id), "index" to listOf(index.toString())))
+                if (!rd.isSuccess) json(502, errSpec("UPSTREAM_ERROR", rd.errorMsg ?: "正文获取失败"))
+                else json(200, okSpec(JSONObject().put("text", (rd.data as? String) ?: "")))
+            }
+            "comic" -> {
+                val loaded = loadRaw(id, index)
+                    ?: return json(502, errSpec("UPSTREAM_ERROR", "图片列表获取失败"))
+                val images = runBlocking {
+                    runCatching {
+                        withTimeoutOrNull(20_000) {
+                            BookHelp.flowImages(loaded.chapter, loaded.raw).toList()
+                        }
+                    }.getOrNull()
+                } ?: return json(502, errSpec("UPSTREAM_ERROR", "图片规则解析失败"))
+                json(200, okSpec(JSONObject().put("images", JSONArray(images))))
+            }
+            "music", "video" -> {
+                val loaded = loadRaw(id, index)
+                    ?: return json(502, errSpec("UPSTREAM_ERROR", "播放地址获取失败"))
+                val mediaUrl = loaded.raw.trim()
+                // 按官方播放器的方式解析: 章节内容 → AnalyzeUrl → 最终播放地址 + 请求头
+                val analyzed = runBlocking {
+                    runCatching {
+                        AnalyzeUrl(
+                            mediaUrl,
+                            source = appDb.bookSourceDao.getBookSource(loaded.book.origin),
+                            ruleData = loaded.book,
+                            chapter = loaded.chapter,
+                        )
+                    }.getOrNull()
+                }
+                val resolved = analyzed?.url?.takeIf { it.isNotBlank() }
+                    ?: mediaUrl.takeIf { it.startsWith("http") }
+                    ?: return json(502, errSpec("UPSTREAM_ERROR", "播放地址解析失败"))
+                val header = JSONObject()
+                analyzed?.headerMap?.forEach { (k, v) -> header.put(k, v) }
+                json(200, okSpec(JSONObject()
+                    .put("url", resolved)
+                    .put("header", header)
+                    .put("variants", JSONArray())))
+            }
+            else -> json(404, errSpec("UNSUPPORTED", "模块 $module 的内容暂不支持"))
+        }
+    }
+
+    // ─────────────────────────── 兼容端点 ───────────────────────────
+
     private fun search(parms: Map<String, String>): Response {
         val q = parms["q"]?.trim()
         val type = parms["type"] ?: "novel"
         if (q.isNullOrEmpty()) return json(400, err("invalid_request", "缺参数 q"))
-        // THP type → legado sourceType: novel→0(text) comic→2(image) music→1(audio) video→4
-        val wantType = when (type) { "comic" -> 2; "music" -> 1; "video" -> 4; else -> 0 }
+        val wantType = MODULES[type] ?: 0
         val rd = EngineSearchController.search(mapOf("key" to listOf(q)))
         if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "搜索失败"))
         @Suppress("UNCHECKED_CAST")
@@ -98,8 +254,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             val st = (b["sourceType"] as? Int) ?: 0
             if (st != wantType) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
-            searchCache[bookUrl] = b
-            if (searchCache.size > 500) searchCache.remove(searchCache.keys.first())
+            cachePut(bookUrl, b)
             items.put(JSONObject()
                 .put("id", bookUrl)
                 .put("name", b["name"] ?: "")
@@ -111,18 +266,12 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
     }
 
-    // ── 目录: 书不在库时按搜索缓存补登, 再走官方 refreshToc ──
     private fun chapters(parms: Map<String, String>): Response {
         val id = parms["id"]
         if (id.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id"))
-        val bookUrl = id
-        ensureBook(bookUrl)
-        val rd = BookController.getChapterList(mapOf("url" to listOf(bookUrl)))
-        if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "目录获取失败"))
-        val list = (rd.data as? List<*>) ?: emptyList<Any>()
+        val list = loadToc(id) ?: return json(502, err("source_error", "目录获取失败"))
         val items = JSONArray()
         for (c in list) {
-            if (c !is BookChapter) continue
             items.put(JSONObject()
                 .put("name", c.title)
                 .put("url", c.url)
@@ -131,32 +280,22 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
     }
 
-    // ── 正文: 章节URL → 反查 index → 官方 getBookContent ──
-    private fun content(parms: Map<String, String>): Response {
+    private fun legacyContent(parms: Map<String, String>): Response {
         val id = parms["id"]
         val chapter = parms["chapter"]
         if (id.isNullOrBlank() || chapter.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id/chapter"))
-        val bookUrl = id
-        ensureBook(bookUrl)
-        // chapter 可能是序号也可能是 URL
-        var index = chapter.toIntOrNull()
-        if (index == null) {
-            val toc = appDb.bookChapterDao.getChapterList(bookUrl)
-            val hit = toc.firstOrNull { it.url == chapter }
-            index = hit?.index
-        }
-        if (index == null) return json(404, err("not_found", "章节不存在"))
-        val rd = BookController.getBookContent(mapOf("url" to listOf(bookUrl), "index" to listOf(index.toString())))
+        val index = resolveChapterIndex(id, chapter)
+            ?: return json(404, err("not_found", "章节不存在"))
+        val rd = BookController.getBookContent(
+            mapOf("url" to listOf(id), "index" to listOf(index.toString())))
         if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "正文获取失败"))
         return json(200, JSONObject().put("object", "novel-content")
             .put("data", JSONObject().put("text", (rd.data as? String) ?: "")))
     }
 
-    // ── 发现: 返回各书源的分类标签(源 → tags), 前端按源分组渲染 ──
     private fun discover(parms: Map<String, String>): Response {
         val type = parms["type"] ?: "novel"
-        // THP type → legado bookSourceType: novel→0(text) music→1(audio) comic→2(image) video→4
-        val wantSourceType = when (type) { "music" -> 1; "comic" -> 2; "video" -> 4; else -> 0 }
+        val wantSourceType = MODULES[type] ?: 0
         val sources = appDb.bookSourceDao.allEnabledExplore
             .filter { it.bookSourceType == wantSourceType && !it.exploreUrl.isNullOrBlank() }
         val items = JSONArray()
@@ -179,7 +318,6 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
     }
 
-    // ── 发现列表: 按 源+分类URL+页码 取书籍条目(字段与 search 对齐, 同样进缓存供目录/正文) ──
     private fun explore(parms: Map<String, String>): Response {
         val source = parms["source"]
         val tagUrl = parms["url"]
@@ -195,21 +333,20 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val items = JSONArray()
         for (sb in books) {
             val st = when {
+                sb.type and BookType.video != 0 -> 4
                 sb.type and BookType.image != 0 -> 2
                 sb.type and BookType.audio != 0 -> 1
                 else -> 0
             }
             val bookUrl = sb.bookUrl
             if (bookUrl.isBlank()) continue
-            val cached = mapOf(
+            cachePut(bookUrl, mapOf(
                 "name" to sb.name, "author" to (sb.author ?: ""),
                 "kind" to (sb.kind ?: ""), "coverUrl" to (sb.coverUrl ?: ""),
                 "intro" to (sb.intro ?: ""), "bookUrl" to bookUrl,
                 "origin" to sb.origin, "originName" to sb.originName,
                 "sourceType" to st
-            )
-            searchCache[bookUrl] = cached
-            if (searchCache.size > 500) searchCache.remove(searchCache.keys.first())
+            ))
             items.put(JSONObject()
                 .put("id", bookUrl)
                 .put("name", sb.name)
@@ -221,29 +358,89 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
     }
 
-    // 书不在 Legado 库 → 用搜索/发现缓存构造 Book 入库(tocUrl 留空, refreshToc 会自动取详情)
+    // ─────────────────────────── 公共支撑 ───────────────────────────
+
+    private data class Loaded(val book: Book, val chapter: BookChapter, val raw: String)
+
+    /** 目录: 书不在库时按搜索缓存补登, 再走官方 getChapterList */
+    private fun loadToc(bookUrl: String): List<BookChapter>? {
+        ensureBook(bookUrl)
+        val rd = BookController.getChapterList(mapOf("url" to listOf(bookUrl)))
+        if (!rd.isSuccess) return null
+        @Suppress("UNCHECKED_CAST")
+        return (rd.data as? List<*>)?.filterIsInstance<BookChapter>()
+    }
+
+    /** chapter 可能是序号也可能是 URL */
+    private fun resolveChapterIndex(bookUrl: String, chapterRef: String): Int? {
+        chapterRef.toIntOrNull()?.let { return it }
+        loadToc(bookUrl) ?: return null
+        return appDb.bookChapterDao.getChapterList(bookUrl).firstOrNull { it.url == chapterRef }?.index
+    }
+
+    /** 取章节原始内容(优先缓存, 未命中则联网解析) */
+    private fun loadRaw(bookUrl: String, index: Int): Loaded? {
+        val book = appDb.bookDao.getBook(bookUrl) ?: return null
+        val chapter = appDb.bookChapterDao.getChapter(bookUrl, index) ?: return null
+        val cached = runCatching { BookHelp.getContent(book, chapter) }.getOrNull()
+        val raw = cached ?: run {
+            val bs = appDb.bookSourceDao.getBookSource(book.origin) ?: return null
+            runBlocking {
+                runCatching { withTimeoutOrNull(25_000) { WebBook.getContentAwait(bs, book, chapter) } }
+                    .getOrNull()
+            } ?: return null
+        }
+        return Loaded(book, chapter, raw)
+    }
+
+    /** 书不在 Legado 库 → 用搜索/发现缓存构造 Book 入库(tocUrl 留空, refreshToc 会自动取详情) */
     private fun ensureBook(bookUrl: String) {
         if (appDb.bookDao.getBook(bookUrl) != null) return
         val c = searchCache[bookUrl] ?: return
-        // 缓存里 sourceType 是归一化的 0/1/2, Book.type 需要 BookType 位标志
         val bookType = when ((c["sourceType"] as? Int) ?: 0) {
             2 -> BookType.image
             1 -> BookType.audio
+            4 -> BookType.video
             else -> BookType.text
         }
-        val book = Book(
-            bookUrl = bookUrl,
-            origin = (c["origin"] as? String) ?: "",
-            originName = (c["originName"] as? String) ?: "",
-            name = (c["name"] as? String) ?: "",
-            author = (c["author"] as? String) ?: "",
-            kind = (c["kind"] as? String),
-            coverUrl = (c["coverUrl"] as? String),
-            intro = (c["intro"] as? String),
-            type = bookType,
-        )
-        runCatching { book.save() }
+        runCatching {
+            Book(
+                bookUrl = bookUrl,
+                origin = (c["origin"] as? String) ?: "",
+                originName = (c["originName"] as? String) ?: "",
+                name = (c["name"] as? String) ?: "",
+                author = (c["author"] as? String) ?: "",
+                kind = (c["kind"] as? String),
+                coverUrl = (c["coverUrl"] as? String),
+                intro = (c["intro"] as? String),
+                type = bookType,
+            ).savePreservingCustomCoverUrl()
+        }
     }
+
+    private fun cachePut(bookUrl: String, v: Map<String, Any?>) {
+        searchCache[bookUrl] = v
+        if (searchCache.size > 500) searchCache.remove(searchCache.keys.first())
+    }
+
+    private fun readJsonBody(session: IHTTPSession): JSONObject? = runCatching {
+        // NanoHTTPD: parseBody 会把 POST 正文放进 files["postData"]
+        val files = HashMap<String, String>()
+        session.parseBody(files)
+        JSONObject(files["postData"]?.takeIf { it.isNotBlank() } ?: "{}")
+    }.getOrNull()
+
+    // ─────────────────────────── 响应封装 ───────────────────────────
+
+    private fun okSpec(data: Any) = JSONObject().put("ok", true).put("data", data)
+
+    private fun errSpec(code: String, msg: String) = JSONObject()
+        .put("ok", false)
+        .put("error", JSONObject().put("code", code).put("message", msg))
+
+    private fun err(type: String, msg: String) = JSONObject()
+        .put("object", "error")
+        .put("data", JSONObject().put("type", type).put("message", msg))
 
     private fun json(code: Int, obj: JSONObject): Response {
         val status = Response.Status.values().firstOrNull { it.requestStatus == code } ?: Response.Status.OK
@@ -252,7 +449,5 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return r
     }
 
-    private fun err(type: String, msg: String) = JSONObject()
-        .put("object", "error")
-        .put("data", JSONObject().put("type", type).put("message", msg))
+    private val REGEX_MODULE = Regex("^/thp/m/([A-Za-z0-9_]+)/([A-Za-z0-9_:]+)$")
 }
