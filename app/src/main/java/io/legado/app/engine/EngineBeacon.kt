@@ -2,6 +2,7 @@ package io.legado.app.engine
 
 import android.content.Context
 import io.legado.app.service.WebService
+import io.legado.app.utils.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -74,13 +75,31 @@ object EngineBeacon {
         }
     }
 
-    /** 本机局域网 IP(WebService.hostAddress 形如 http://192.168.1.5:1122, 这里只取 host) */
+    /**
+     * 本机局域网 IPv4 —— 复用 legado 的网卡枚举(已排除回环/非 IPv4), 优先私有网段
+     * (192.168/10./172.16-31)。不依赖 legado 自带的 WebService(:1122), 引擎自己的
+     * ThpServer(:1234) 是独立在跑的。
+     */
     fun lanHost(): String {
-        if (!WebService.isRun) return ""
-        val raw = WebService.hostAddress
-        if (raw.isEmpty()) return ""
+        val v4 = runCatching { NetworkUtils.getLocalIPAddress() }
+            .getOrDefault(emptyList())
+            .mapNotNull { it.hostAddress }
+        v4.firstOrNull { isPrivateV4(it) }?.let { return it }
+        v4.firstOrNull()?.let { return it }
+        // 兜底: 若 legado 自带 WebService 恰好在跑, 用它的地址
+        val raw = runCatching { if (WebService.isRun) WebService.hostAddress else "" }
+            .getOrDefault("")
         return raw.removePrefix("http://").removePrefix("https://")
             .substringBefore('/').substringBefore(':')
+    }
+
+    private fun isPrivateV4(ip: String): Boolean {
+        if (ip.startsWith("192.168.") || ip.startsWith("10.")) return true
+        if (ip.startsWith("172.")) {
+            val second = ip.split('.').getOrNull(1)?.toIntOrNull() ?: return false
+            return second in 16..31
+        }
+        return false
     }
 
     /** 本机引擎地址(局域网), 未就绪时返回空串 */

@@ -263,7 +263,11 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("intro", (b["intro"] as? String ?: "").take(200))
                 .put("kind", b["kind"] ?: ""))
         }
-        return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
+        return json(200, JSONObject()
+            .put("object", "list")
+            // 顶层扁平数组: v2/v4 后端降级归一化优先读 j.items, 缺了会把 j.data 当数组用而抛错
+            .put("items", items)
+            .put("data", JSONObject().put("items", items)))
     }
 
     private fun chapters(parms: Map<String, String>): Response {
@@ -277,13 +281,17 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("url", c.url)
                 .put("index", c.index))
         }
-        return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
+        return json(200, JSONObject()
+            .put("object", "list")
+            .put("items", items)
+            .put("data", JSONObject().put("items", items)))
     }
 
     private fun legacyContent(parms: Map<String, String>): Response {
         val id = parms["id"]
-        val chapter = parms["chapter"]
-        if (id.isNullOrBlank() || chapter.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id/chapter"))
+        // 兼容 chapterId(规范/新调用方) 与 chapter(旧草稿)
+        val chapter = parms["chapterId"] ?: parms["chapter"]
+        if (id.isNullOrBlank() || chapter.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id/chapterId"))
         val index = resolveChapterIndex(id, chapter)
             ?: return json(404, err("not_found", "章节不存在"))
         val rd = BookController.getBookContent(
@@ -315,7 +323,10 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("sourceName", bs.bookSourceName)
                 .put("tags", tags))
         }
-        return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
+        return json(200, JSONObject()
+            .put("object", "list")
+            .put("items", items)
+            .put("data", JSONObject().put("items", items)))
     }
 
     private fun explore(parms: Map<String, String>): Response {
@@ -355,7 +366,10 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("intro", (sb.intro ?: "").take(200))
                 .put("kind", sb.kind ?: ""))
         }
-        return json(200, JSONObject().put("object", "list").put("data", JSONObject().put("items", items)))
+        return json(200, JSONObject()
+            .put("object", "list")
+            .put("items", items)
+            .put("data", JSONObject().put("items", items)))
     }
 
     // ─────────────────────────── 公共支撑 ───────────────────────────
