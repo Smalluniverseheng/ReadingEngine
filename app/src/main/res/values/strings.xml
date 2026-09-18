@@ -109,7 +109,7 @@
     <string name="offline_cache_s">cache the selected chapter(s) to Storage</string>
     <string name="change_origin">Change Origin</string>
     <string name="about_description">
-        \u3000\u3000 This is an open source reading software newly developed by Kotlin, welcome to join us.
+        \u3000\u3000Reading Engine - a local book-source parsing engine derived from Legado (GPL-3.0). It exposes a unified API on your LAN; novels, comics, audiobooks and videos are all resolved by the rules on this device.
     </string>
     <string name="app_share_description">Reading Engine - a local book-source parsing engine that works right on your LAN.</string>
     <string name="version_name">Version %s</string>
@@ -241,6 +241,7 @@
     <string name="check_update">Check for Updates</string>
     <string name="check_beta_update">Check for Beta Updates</string>
     <string name="check_beta_update_failed">Failed to check for beta updates</string>
+    <string name="engine_panel_summary">LAN API and book-source management, running on this device. No account needed.</string>
     <string name="local_engine_update_disabled">This is a local-only engine with no online update channel. Please obtain a new installation package to update.</string>
     <string name="beta_update_unsupported">This installation cannot be updated to a beta build. Only beta-signed release or releaseA packages are supported.</string>
     <string name="beta_update_no_compatible_apk">A newer beta exists, but it has no APK compatible with this device</string>

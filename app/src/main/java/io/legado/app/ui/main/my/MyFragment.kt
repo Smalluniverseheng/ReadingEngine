@@ -248,6 +248,12 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
         override fun onPreferenceTreeClick(preference: Preference): Boolean {
             when (preference.key) {
                 "myMore" -> startActivity<ConfigActivity> { putExtra("configTag", ConfigTag.MY_MORE) }
+                "enginePanel" -> startActivity(
+                    android.content.Intent(
+                        requireContext(),
+                        io.legado.app.engine.EngineSetupActivity::class.java
+                    )
+                )
                 "check_update" -> checkAppUpdate()
                 "check_beta_update" -> checkAppUpdate(beta = true)
                 "bookSourceManage" -> startActivity<BookSourceActivity>()

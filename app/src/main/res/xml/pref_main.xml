@@ -6,6 +6,13 @@
 
     <io.legado.app.lib.prefs.Preference
         android:icon="@drawable/ic_cfg_source"
+        android:key="enginePanel"
+        android:summary="@string/engine_panel_summary"
+        android:title="@string/app_name"
+        app:iconSpaceReserved="false" />
+
+    <io.legado.app.lib.prefs.Preference
+        android:icon="@drawable/ic_cfg_source"
         android:key="bookSourceManage"
         android:summary="@string/book_source_manage_desc"
         android:title="@string/book_source_manage"

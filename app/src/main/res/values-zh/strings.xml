@@ -107,7 +107,7 @@
     <string name="offline_cache_s">缓存选择的章节到本地</string>
     <string name="change_origin">换源</string>
     <string name="about_description">
-        \u3000\u3000这是一款使用 Kotlin 全新开发的开源的阅读软件，欢迎您的加入。
+        \u3000\u3000阅读引擎 —— 基于开源阅读（Legado，GPL-3.0）改造的本地书源解析引擎。它在局域网内提供统一接口，小说、漫画、听书、视频均由本机解析规则取得。
     </string>
     <string name="app_share_description">阅读引擎 —— 局域网内即插即用的本地书源解析引擎。</string>
     <string name="version_name">版本 %s</string>
@@ -239,6 +239,7 @@
     <string name="check_update">检查更新</string>
     <string name="check_beta_update">检查测试版更新</string>
     <string name="check_beta_update_failed">检查测试版更新失败</string>
+    <string name="engine_panel_summary">本机运行的局域网接口与书源管理，无需账号</string>
     <string name="local_engine_update_disabled">本引擎为纯本地软件，不含在线更新通道；更新请重新获取安装包。</string>
     <string name="beta_update_unsupported">当前安装包不能直接升级测试版，仅支持 beta 签名的 release 或 releaseA 安装包</string>
     <string name="beta_update_no_compatible_apk">发现新版测试版，但没有适用于当前设备的安装包</string>
