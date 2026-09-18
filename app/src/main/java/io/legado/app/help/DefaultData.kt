@@ -2,6 +2,7 @@ package io.legado.app.help
 
 import io.legado.app.constant.AppConst
 import io.legado.app.data.appDb
+import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.DictRule
 import io.legado.app.data.entities.HttpTTS
 import io.legado.app.data.entities.KeyboardAssist
@@ -36,6 +37,9 @@ object DefaultData {
                 }
                 if (LocalConfig.needUpDictRule) {
                     importDefaultDictRules()
+                }
+                if (LocalConfig.needUpDefaultBookSource) {
+                    importDefaultBookSources()
                 }
             }.onError {
                 it.printOnDebug()
@@ -103,6 +107,18 @@ object DefaultData {
         GSON.fromJsonArray<DictRule>(json).getOrThrow()
     }
 
+    /**
+     * 内置书源(assets/defaultData/bookSources.json)。
+     * 出场自带书源是"发现页/搜索能直接调用到"的前提: 没有书源时引擎返回的结果恒为空。
+     */
+    val bookSources: List<BookSource> by lazy {
+        val json = String(
+            appCtx.assets.open("defaultData${File.separator}bookSources.json")
+                .readBytes()
+        )
+        GSON.fromJsonArray<BookSource>(json).getOrNull() ?: emptyList()
+    }
+
     val keyboardAssists: List<KeyboardAssist> by lazy {
         val json = String(
             appCtx.assets.open("defaultData${File.separator}keyboardAssists.json")
@@ -134,6 +150,19 @@ object DefaultData {
 
     fun importDefaultDictRules() {
         appDb.dictRuleDao.insert(*dictRules.toTypedArray())
+    }
+
+    /**
+     * 只补"库里还没有"的出场书源, 已存在(哪怕被用户改过/停用)一律不动。
+     * 这样既能保证新装用户发现页非空, 又不会在升级时覆盖用户的修改。
+     */
+    fun importDefaultBookSources() {
+        if (bookSources.isEmpty()) return
+        val exists = appDb.bookSourceDao.all.map { it.bookSourceUrl }.toHashSet()
+        val add = bookSources.filter { it.bookSourceUrl !in exists }
+        if (add.isNotEmpty()) {
+            appDb.bookSourceDao.insert(*add.toTypedArray())
+        }
     }
 
 }

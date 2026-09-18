@@ -71,6 +71,13 @@ by appCtx.getSharedPreferences("local", Context.MODE_PRIVATE) {
     val needUpDictRule: Boolean
         get() = !isLastVersion(2, "needUpDictRule")
 
+    /**
+     * 首次安装时把 assets/defaultData/bookSources.json 内置书源导入数据库。
+     * 只在首次(或该标记未写过的老版本升级)时执行一次, 之后用户增删改不再被覆盖。
+     */
+    val needUpDefaultBookSource: Boolean
+        get() = !isLastVersion(1, "defaultBookSourceVersion")
+
     var versionCode
         get() = getLong(versionCodeKey, 0)
         set(value) {
