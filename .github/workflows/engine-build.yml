@@ -1,0 +1,79 @@
+name: engine-build
+
+# 阅读引擎 APK 构建
+# 触发: 推送 engine-v* 标签, 或手动 workflow_dispatch
+# 产物: Release 附件 reading-engine-<版本>.apk (覆盖安装可保留数据, 只要签名一致)
+on:
+  push:
+    tags: ['engine-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          V=$(grep -m1 'def version = ' app/build.gradle | sed -E 's/.*"([^"]+)".*/\1/')
+          test -n "$V" || { echo "::error::未能从 app/build.gradle 解析版本号"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "engine version = $V"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 写入签名密钥
+        env:
+          ENGINE_KEY_STORE: ${{ secrets.ENGINE_KEY_STORE }}
+        run: |
+          if [ -z "$ENGINE_KEY_STORE" ]; then
+            echo "::error::缺少仓库密钥 ENGINE_KEY_STORE"; exit 1
+          fi
+          printf '%s' "$ENGINE_KEY_STORE" | base64 --decode > "$GITHUB_WORKSPACE/app/engine.jks"
+
+      - name: 构建 Release APK
+        env:
+          ENGINE_KEY_PASSWORD: ${{ secrets.ENGINE_KEY_PASSWORD }}
+          ENGINE_STORE_PASSWORD: ${{ secrets.ENGINE_STORE_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleAppRelease -ParmOnly=true \
+            -PRELEASE_STORE_FILE=./engine.jks \
+            -PRELEASE_STORE_PASSWORD="$ENGINE_STORE_PASSWORD" \
+            -PRELEASE_KEY_ALIAS=reading-engine \
+            -PRELEASE_KEY_PASSWORD="$ENGINE_KEY_PASSWORD" \
+            --parallel --warning-mode=summary
+
+      - name: 收集产物
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          test -n "$APK" || { echo "::error::未生成 APK"; exit 1; }
+          OUT="reading-engine-${{ steps.ver.outputs.version }}.apk"
+          cp "$APK" "$OUT"
+          echo "name=$OUT" >> "$GITHUB_OUTPUT"
+          ls -la "$OUT"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('engine-v{0}', steps.ver.outputs.version) }}
+          name: 阅读引擎 ${{ steps.ver.outputs.version }}
+          body: |
+            阅读引擎 ${{ steps.ver.outputs.version }}
+
+            - 本地书源解析引擎, 局域网内即插即用
+            - 支持小说 / 漫画 / 听书
+            - 无需账号, 不连接任何云端服务
+          files: ${{ steps.apk.outputs.name }}
+          draft: false

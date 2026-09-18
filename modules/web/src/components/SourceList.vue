@@ -1,0 +1,190 @@
+<template>
+  <div class="source-list-panel">
+    <el-input
+      v-model="searchKey"
+      class="search"
+      :prefix-icon="Search"
+      placeholder="筛选源"
+    />
+    <SourceCheckControls v-if="isBookSource" :sources="sourceSelect" :active="store.sourceMode === 'json' && store.currentTab === 'editList'" />
+    <el-checkbox
+      :model-value="sourcesFiltered.length > 0 && sourceSelect.length === sourcesFiltered.length"
+      :indeterminate="sourceSelect.length > 0 && sourceSelect.length < sourcesFiltered.length"
+      :disabled="sourcesFiltered.length === 0"
+      @change="selectVisible"
+    >全选当前筛选</el-checkbox>
+    <div class="tool">
+      <el-button @click="importSourceFile" :icon="Folder">打开</el-button>
+      <el-button
+        :disabled="sourcesFiltered.length === 0"
+        @click="outExport"
+        :icon="Download"
+      >
+        导出</el-button
+      >
+      <el-button
+        type="danger"
+        :icon="Delete"
+        @click="deleteSelectSources"
+        :disabled="sourceSelect.length === 0"
+        >删除</el-button
+      >
+      <el-button
+        :icon="Delete"
+        @click="clearAllSources"
+        :disabled="sources.length === 0"
+        >清空列表</el-button
+      >
+    </div>
+    <el-checkbox-group id="source-list" v-model="sourceUrlSelect">
+      <virtual-list
+        style="height: 100%; overflow-y: auto; overflow-x: hidden"
+        :data-key="getSourceUniqueKey"
+        :data-sources="sourcesFiltered"
+        :data-component="SourceItem"
+        :estimate-size="45"
+      />
+    </el-checkbox-group>
+  </div>
+</template>
+
+<script setup lang="ts">
+import API from '@api'
+import { Folder, Delete, Download, Search } from '@element-plus/icons-vue'
+import {
+  isSourceMatches,
+  getSourceUniqueKey,
+  convertSourcesToMap,
+} from '@utils/souce'
+import VirtualList from 'vue3-virtual-scroll-list'
+import SourceItem from './SourceItem.vue'
+import SourceCheckControls from './SourceCheckControls.vue'
+import type { Source } from '@/source'
+
+const store = useSourceStore()
+const sourceUrlSelect = ref<string[]>([])
+const searchKey = ref('')
+const sources = computed(() => store.sources)
+
+/* 筛选源 */
+const sourcesFiltered = computed<Source[]>(() => {
+  const key = searchKey.value
+  return sources.value.filter(source =>
+    (key === '' || isSourceMatches(source, key)) &&
+    (!isBookSource || !store.checkStatusFilter || store.checkStatus(source) === store.checkStatusFilter))
+})
+// 计算当前筛选关键词下的选中源
+const sourceSelect = computed<Source[]>(() => {
+  const urls = sourceUrlSelect.value
+  if (urls.length == 0) return []
+  const sourcesFilteredMap = convertSourcesToMap(sourcesFiltered.value)
+  return urls.reduce((sources, sourceUrl) => {
+    const source = sourcesFilteredMap.get(sourceUrl)
+    if (source) sources.push(source)
+    return sources
+  }, [] as Source[])
+})
+
+const selectVisible = (selected: string | number | boolean) => {
+  const urls = new Set(sourceUrlSelect.value)
+  sourcesFiltered.value.forEach(source => {
+    const url = getSourceUniqueKey(source)
+    if (selected) urls.add(url)
+    else urls.delete(url)
+  })
+  sourceUrlSelect.value = Array.from(urls)
+}
+
+const deleteSelectSources = () => {
+  const sourceSelectValue = sourceSelect.value
+  API.deleteSource(sourceSelectValue).then(({ data }) => {
+    if (!data.isSuccess) return ElMessage.error(data.errorMsg)
+    store.deleteSources(sourceSelectValue)
+    const sourceUrlSelectRawValue = toRaw(sourceUrlSelect.value)
+    sourceSelectValue.forEach(source => {
+      const index = sourceUrlSelectRawValue.indexOf(getSourceUniqueKey(source))
+      if (index > -1) sourceUrlSelectRawValue.splice(index, 1)
+    })
+    sourceUrlSelect.value = sourceUrlSelectRawValue
+  })
+}
+const clearAllSources = () => {
+  store.clearAllSource()
+  sourceUrlSelect.value = []
+}
+
+//导入本地文件
+const importSourceFile = () => {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.json,.txt'
+  input.addEventListener('change', () => {
+    const files = input.files
+    if (files === null) {
+      return ElMessage.info('未选择文件')
+    }
+    const reader = new FileReader()
+    reader.readAsText(files[0])
+    reader.onload = () => {
+      try {
+        const jsonData = JSON.parse(reader.result as string)
+        store.saveSources(jsonData)
+      } catch (e: unknown) {
+        ElMessage.error('上传的源格式错误: ' + (e as Error).message)
+      }
+    }
+  })
+  input.click()
+}
+
+const isBookSource = /bookSource/i.test(window.location.href)
+const outExport = () => {
+  const exportFile = document.createElement('a')
+  const sources =
+      sourceSelect.value.length === 0
+        ? sourcesFiltered.value
+        : sourceSelect.value,
+    sourceType = isBookSource ? 'BookSource' : 'RssSource'
+
+  exportFile.download = `${sourceType}_${Date()
+    .replace(/.*?\s(\d+)\s(\d+)\s(\d+:\d+:\d+).*/, '$2$1$3')
+    .replace(/:/g, '')}.json`
+
+  const myBlob = new Blob([JSON.stringify(sources, null, 4)], {
+    type: 'application/json',
+  })
+  exportFile.href = window.URL.createObjectURL(myBlob)
+  exportFile.click()
+  window.URL.revokeObjectURL(exportFile.href) //avoid memory leak
+}
+</script>
+
+<style lang="scss" scoped>
+.source-list-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.tool {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+  justify-content: center;
+
+  .el-button + .el-button {
+    margin-left: 0;
+  }
+}
+
+#source-list {
+  flex: 1;
+  min-height: 0;
+  margin-top: 6px;
+  :deep(.el-checkbox) {
+    margin-bottom: 4px;
+    width: 100%;
+  }
+}
+</style>
