@@ -29,8 +29,8 @@ object EngineBeacon {
     /** 广播周期(ms) */
     private const val BROADCAST_INTERVAL_MS = 5_000L
 
-    /** 本引擎能力(THP caps): 小说 / 漫画 / 听书音频 */
-    const val CAPS = "novel,comic,audio"
+    /** 本引擎能力(THP caps, 见 docs THP §11 caps 注册表) */
+    const val CAPS = "m:novel,m:comic,m:music,m:video"
 
     /** 对外展示名 */
     const val NAME = "阅读引擎"

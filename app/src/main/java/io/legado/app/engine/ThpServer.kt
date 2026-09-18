@@ -35,7 +35,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     companion object {
         const val PORT = 1234
-        const val VERSION = "engine-1.3.0"
+        const val VERSION = "engine-1.4.0"
         private var instance: ThpServer? = null
 
         @Synchronized
@@ -65,8 +65,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                     .put("object", "meta")
                     .put("data", JSONObject()
                         .put("name", "阅读引擎")
+                        .put("role", "engine")
                         .put("version", VERSION)
-                        .put("caps", JSONArray().put("novel").put("comic").put("audio"))
+                        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video"))
                         .put("auth", JSONArray().put("none"))))
                 uri == "/thp/search" -> search(session.parms)
                 uri == "/thp/chapters" -> chapters(session.parms)
@@ -86,8 +87,8 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val q = parms["q"]?.trim()
         val type = parms["type"] ?: "novel"
         if (q.isNullOrEmpty()) return json(400, err("invalid_request", "缺参数 q"))
-        // THP type → legado sourceType: novel→0(text) comic→2(image) music→1(audio)
-        val wantType = when (type) { "comic" -> 2; "music" -> 1; else -> 0 }
+        // THP type → legado sourceType: novel→0(text) comic→2(image) music→1(audio) video→4
+        val wantType = when (type) { "comic" -> 2; "music" -> 1; "video" -> 4; else -> 0 }
         val rd = EngineSearchController.search(mapOf("key" to listOf(q)))
         if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "搜索失败"))
         @Suppress("UNCHECKED_CAST")

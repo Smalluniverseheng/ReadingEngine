@@ -91,7 +91,7 @@ class EngineSetupActivity : AppCompatActivity() {
             appendLine("引擎服务:  ${if (WebService.isRun) "运行中" else "启动中…"}")
             appendLine("局域网地址:  ${EngineBeacon.lanUrl().ifEmpty { "获取中…" }}")
             appendLine("发现广播:  UDP ${EngineBeacon.BEACON_PORT}   THP/1 HELLO")
-            appendLine("支持内容:  小说 / 漫画 / 听书")
+            appendLine("支持内容:  小说 / 漫画 / 听书 / 视频")
             appendLine("协议版本:  ${ThpServer.VERSION}")
             if (host.isEmpty()) appendLine("提示:  未检测到局域网地址, 请确认已连接 Wi-Fi")
         }

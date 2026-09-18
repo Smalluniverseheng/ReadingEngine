@@ -7,7 +7,7 @@
 - **后台常驻**：开机自启，无需手动打开 App。
 - **局域网即插即用**：周期性发送 THP/1 广播，前端可自动发现本机；也可手动填写引擎地址。
 - **统一输出**：把各书源五花八门的返回，归一化成同一种结构再交给前端。
-- **内容类型**：小说、漫画、听书（音频）。
+- **内容类型**：小说、漫画、听书（音频）、视频。
 
 支持的内容与格式取决于你导入的书源；书源越多，可搜索到的内容越全。
 
@@ -32,13 +32,15 @@
 | `/thp/discover?type=novel` | 发现页：按书源分组返回分类标签 |
 | `/thp/explore?type=novel&source=源URL&url=分类URL&page=1` | 发现列表 |
 
-`type` 取值：`novel` / `comic` / `music`。
+`type` 取值：`novel` / `comic` / `music` / `video`。
 
 自动发现：引擎每 5 秒向 UDP `19527` 广播一次
 
 ```
 THP/1 HELLO <port> <instanceId> engine <caps> <name>
 ```
+
+`caps` 采用 THP caps 注册表写法（`m:novel,m:comic,m:music,m:video`）。
 
 ## 源码与许可
 
