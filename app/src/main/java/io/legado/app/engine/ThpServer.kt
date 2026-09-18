@@ -457,7 +457,15 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         .put("data", JSONObject().put("type", type).put("message", msg))
 
     private fun json(code: Int, obj: JSONObject): Response {
-        val status = Response.Status.values().firstOrNull { it.requestStatus == code } ?: Response.Status.OK
+        // NanoHTTPD 的 Status 枚举并不覆盖全部 4xx/5xx（例如没有 502），
+        // firstOrNull 取不到就会静默退化成 200 —— 调用方若只看 HTTP 状态，会把错误当成功。
+        // 因此按区间兜底：4xx → BAD_REQUEST，5xx → INTERNAL_ERROR。
+        val status = Response.Status.values().firstOrNull { it.requestStatus == code }
+            ?: when (code) {
+                in 400..499 -> Response.Status.BAD_REQUEST
+                in 500..599 -> Response.Status.INTERNAL_ERROR
+                else -> Response.Status.OK
+            }
         val r = newFixedLengthResponse(status, "application/json; charset=utf-8", obj.toString())
         r.addHeader("Access-Control-Allow-Origin", "*")
         return r
