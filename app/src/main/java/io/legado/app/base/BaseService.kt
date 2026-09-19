@@ -8,6 +8,7 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
 import io.legado.app.help.LifecycleHelp
+import io.legado.app.help.NotificationChannels
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.lib.permission.Permissions
 import io.legado.app.lib.permission.PermissionsCompat
@@ -54,6 +55,10 @@ abstract class BaseService : LifecycleService() {
             "onStartCommand $intent ${intent?.toUri(0)}"
         }
         if (!isForeground) {
+            // ★ 兜底(见 NotificationChannels 注释): 渠道不存在时 startForeground 会被系统
+            //   异步抛 CannotPostForegroundServiceNotificationException 直接杀进程, 拦不住。
+            //   开机广播 / 磁贴 / 外部显式启动等入口不经过 App.onCreate 的启动顺序保障, 故此处再兜一次。
+            NotificationChannels.ensure()
             if (!tryStartForegroundNotification()) {
                 stopSelfResult(startId)
                 return START_NOT_STICKY

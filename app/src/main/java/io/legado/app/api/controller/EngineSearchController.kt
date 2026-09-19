@@ -21,7 +21,18 @@ import java.util.concurrent.TimeUnit
  */
 object EngineSearchController {
 
-    fun search(parameters: Map<String, List<String>>): ReturnData {
+    /** 全源搜索的默认时间预算(秒)。旧 HTTP 接口/兼容端点沿用此值，保持既有行为不变。 */
+    const val DEFAULT_TIMEOUT_SEC = 25L
+
+    /**
+     * @param timeoutSec 搜索时间预算(秒)。到时返回**已收集到的部分结果**（聚合搜索允许部分返回），
+     *   而不是报错 —— THP §4 明确「你的引擎慢了只会被跳过」，返回部分结果远好于整体超时。
+     *   THP 规范端点按调用方 8s 预算传入更小的值(见 ThpServer.SPEC_SEARCH_TIMEOUT_SEC)。
+     */
+    fun search(
+        parameters: Map<String, List<String>>,
+        timeoutSec: Long = DEFAULT_TIMEOUT_SEC,
+    ): ReturnData {
         val key = parameters["key"]?.firstOrNull()?.trim()
         if (key.isNullOrEmpty()) return ReturnData().setErrorMsg("参数key不能为空")
         val results = CopyOnWriteArrayList<SearchBook>()
@@ -38,7 +49,7 @@ object EngineSearchController {
         return try {
             val model = SearchModel(scope, callBack)
             model.search(System.currentTimeMillis(), key)
-            done.await(25, TimeUnit.SECONDS)
+            done.await(timeoutSec, TimeUnit.SECONDS)
             runCatching { model.close() }
             // 附带书源类型, 方便后端按模块路由(0小说 1音频 2漫画 4视频)
             // 注意: SearchBook.type 是 BookType 位标志(video=4/text=8/audio=32/image=64), 需归一化为 0/1/2/4

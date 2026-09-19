@@ -1,9 +1,6 @@
 package io.legado.app
 
 import android.app.Application
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
@@ -17,9 +14,6 @@ import com.script.rhino.RhinoScriptEngine
 import com.script.rhino.RhinoWrapFactory
 import io.legado.app.base.AppContextWrapper
 import io.legado.app.constant.AppLog
-import io.legado.app.constant.AppConst.channelIdDownload
-import io.legado.app.constant.AppConst.channelIdReadAloud
-import io.legado.app.constant.AppConst.channelIdWeb
 import io.legado.app.constant.PreferKey
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
@@ -37,6 +31,7 @@ import io.legado.app.help.CrashHandler
 import io.legado.app.help.DefaultData
 import io.legado.app.help.DispatchersMonitor
 import io.legado.app.help.LifecycleHelp
+import io.legado.app.help.NotificationChannels
 import io.legado.app.help.RuleBigDataHelp
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ResourceThemeGeneration
@@ -63,7 +58,6 @@ import io.legado.app.utils.isDebuggable
 import kotlinx.coroutines.launch
 import org.chromium.base.ThreadUtils
 import splitties.init.appCtx
-import splitties.systemservices.notificationManager
 import java.net.URL
 import java.util.concurrent.TimeUnit
 import java.util.logging.Level
@@ -75,6 +69,11 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashHandler(this)
+        // ★ 通知渠道必须最先同步建好: 下一行就会启动前台服务, 服务 onStartCommand 里
+        //   的 startForeground() 要求渠道已存在, 否则系统异步抛
+        //   CannotPostForegroundServiceNotificationException 直接杀进程(且 try/catch 无效)。
+        //   详见 NotificationChannels 的注释。
+        NotificationChannels.ensure()
         // 阅读引擎: 开机即用 —— 自动启动本地 Web 服务与局域网广播
         runCatching {
             io.legado.app.service.WebService.startForeground(this)
@@ -102,7 +101,8 @@ class App : Application() {
                 runCatching { Cronet.preDownload() }
                     .onFailure { AppLog.put("预下载Cronet失败", it) }
             }
-            createNotificationChannels()
+            // 渠道已在 onCreate 开头同步建好; 此处再兜一次(幂等, 覆盖首调失败的情况)
+            NotificationChannels.ensure()
             LiveEventBus.config()
                 .lifecycleObserverAlwaysActive(true)
                 .autoClear(false)
@@ -198,51 +198,10 @@ class App : Application() {
 
     /**
      * 创建通知ID
+     *
+     * 已迁移到 [NotificationChannels.ensure] —— 原因是它必须在任何前台服务启动之前
+     * **同步**完成，不能留在 onCreate 的异步协程里（详见 NotificationChannels 的注释）。
      */
-    private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val downloadChannel = NotificationChannel(
-            channelIdDownload,
-            getString(R.string.action_download),
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            enableLights(false)
-            enableVibration(false)
-            setSound(null, null)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-
-        val readAloudChannel = NotificationChannel(
-            channelIdReadAloud,
-            getString(R.string.read_aloud),
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            enableLights(false)
-            enableVibration(false)
-            setSound(null, null)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-
-        val webChannel = NotificationChannel(
-            channelIdWeb,
-            getString(R.string.web_service),
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            enableLights(false)
-            enableVibration(false)
-            setSound(null, null)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-
-        //向notification manager 提交channel
-        notificationManager.createNotificationChannels(
-            listOf(
-                downloadChannel,
-                readAloudChannel,
-                webChannel
-            )
-        )
-    }
 
     private fun initRhino() {
         RhinoScriptEngine.initialize()

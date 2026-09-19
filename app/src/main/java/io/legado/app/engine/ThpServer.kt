@@ -47,8 +47,32 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     companion object {
         const val PORT = 1234
-        const val VERSION = "1.5.0"
+
+        /**
+         * 引擎版本。★取构建期 versionName，不再手写常量 ——
+         * 旧实现把这里写死成 "1.5.0"，发到 1.5.3 时 meta.version 仍报 1.5.0，
+         * 前端据此判断引擎能力/兼容性会判错。用 BuildConfig 使其永不漂移。
+         * （不能用 const：BuildConfig 字段是 Java static final，Kotlin 不认作编译期常量。）
+         */
+        val VERSION: String = io.legado.app.BuildConfig.VERSION_NAME
+
         const val PROTOCOL = "THP/1.0"
+
+        /** §8: limit 默认 20、最大 100（超限截断不报错） */
+        private const val DEFAULT_LIMIT = 20
+        private const val MAX_LIMIT = 100
+
+        /**
+         * 规范端点搜索的时间预算(秒)。
+         * 依据 THP §4：单端点响应建议 ≤15s，而资源库聚合搜索给单 peer 的超时是 **8s**。
+         * 引擎旧默认预算是 25s —— 超过调用方超时，等于引擎的规范搜索**永远被判定失败**。
+         * 这里压到 7s，留 1s 网络余量，保证结果能在调用方超时前返回（聚合搜索允许部分结果）。
+         */
+        private const val SPEC_SEARCH_TIMEOUT_SEC = 7L
+
+        /** discover/explore 遍历全部源的总预算(ms)，防止"源多时单个请求跑几分钟" */
+        private const val DISCOVER_BUDGET_MS = 12_000L
+
         private var instance: ThpServer? = null
 
         /** 模块名 → legado 书源类型(THP §6.1) */
@@ -57,6 +81,16 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             "music" to 1,   // audio
             "comic" to 2,   // image
             "video" to 4,   // video
+        )
+
+        /**
+         * 旧草稿端点集合。这些端点的**请求**形状与**响应**形状都是历史遗留：
+         * 请求走 query 而非 JSON body，响应走 {object,data} 而非 THP 信封。
+         * v2/v4 后端的 engineCall() 降级链在最后一步读它们，并靠 `object == "error"` 判错，
+         * 所以它们的错误响应必须保持旧形状，不能一并改成 THP 信封。
+         */
+        private val LEGACY_ENDPOINTS = setOf(
+            "/thp/search", "/thp/chapters", "/thp/content", "/thp/discover", "/thp/explore"
         )
 
         @Synchronized
@@ -77,18 +111,34 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
     /** 搜索结果缓存: bookUrl → 归一化字段(目录阶段据此补登入库) */
     private val searchCache = ConcurrentHashMap<String, Map<String, Any?>>()
 
+    /**
+     * 当前请求的 X-TH-Request-Id（THP §3.1 要求原样回显）。
+     * NanoHTTPD 逐请求在工作线程上跑 serve()，故用 ThreadLocal 传递到 json()。
+     * serve() 每次无条件 set(可能为 null)，不会残留上一个请求的值。
+     */
+    private val requestId = ThreadLocal<String?>()
+
     private val instanceId: String by lazy { EngineBeacon.instanceId() }
 
     // ─────────────────────────── 路由 ───────────────────────────
 
     override fun serve(session: IHTTPSession): Response {
-        val uri = session.uri ?: return json(400, err("invalid_request", "缺 uri"))
-        if (!uri.startsWith("/thp")) return json(404, err("not_found", "未知端点"))
+        // THP §3.1: 原样回显调用方的 X-TH-Request-Id（无条件 set，避免 ThreadLocal 残留上个请求的值）
+        val hdrs = session.headers
+        requestId.set(if (hdrs == null) null else hdrs["x-th-request-id"])
+
+        val uri = session.uri
+        if (uri == null) return json(400, errSpec("INVALID_REQUEST", "缺 uri"))
+        if (!uri.startsWith("/thp")) return json(404, errSpec("NOT_FOUND", "未知端点"))
 
         // 取参: POST 走 JSON body, 否则走 query
         val q = session.parms ?: emptyMap()
         val body: JSONObject? = if (session.method == Method.POST) readJsonBody(session) else null
         val get: (String) -> String? = { k -> body?.optString(k)?.takeIf { it.isNotEmpty() } ?: q[k] }
+
+        // 旧草稿端点必须继续吐旧信封(老客户端按 object:"error" 判错，且 v2/v4 后端在降级链里读它)；
+        // 规范端点一律走 THP 信封 —— THP §3.2「失败判断唯一依据 ok:false」。
+        val legacyPath = uri in LEGACY_ENDPOINTS
 
         return try {
             when {
@@ -116,10 +166,13 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 uri == "/thp/discover" -> discover(q)
                 uri == "/thp/explore" -> explore(q)
 
-                else -> json(404, err("not_found", "未知端点"))
+                // 未知端点也必须是 THP 信封(THP-SDK §6 自测第 4 条)
+                else -> json(404, errSpec("NOT_FOUND", "未知端点"))
             }
         } catch (e: Exception) {
-            json(500, err("engine_error", e.message ?: "引擎内部错误"))
+            if (legacyPath) json(500, err("engine_error", e.message ?: "引擎内部错误"))
+            // 规范化: 错误码用注册表里的 UPSTREAM_FAIL, 不用自造的 UPSTREAM_ERROR(§10)
+            else json(500, errSpec("UPSTREAM_FAIL", e.message ?: "引擎内部错误"))
         }
     }
 
@@ -132,7 +185,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         .put("name", EngineBeacon.NAME)
         .put("version", VERSION)
         .put("vendor", "reading-engine")
-        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video"))
+        // §11 caps: 声明 post-query —— 三个规范端点都实现了 POST 版;
+        // 不声明调用方会按 §7.3 优先 POST 却认为该引擎不支持 POST, 造成能力声明与实际不符。
+        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video").put("post-query"))
         .put("auth", JSONArray().put("none"))
         .put("remote", false)
         .put("endpoints", JSONArray().put("search").put("toc").put("content"))
@@ -142,9 +197,12 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
     private fun specSearch(module: String, get: (String) -> String?): Response {
         val q = (get("q") ?: get("key"))?.trim()
         if (q.isNullOrEmpty()) return json(400, errSpec("INVALID_REQUEST", "缺参数 q"))
-        val limit = get("limit")?.toIntOrNull() ?: 50
-        val rd = EngineSearchController.search(mapOf("key" to listOf(q)))
-        if (!rd.isSuccess) return json(502, errSpec("UPSTREAM_ERROR", rd.errorMsg ?: "搜索失败"))
+        // §8: limit 默认 20、最大 100，超限自动截断不报错（旧实现默认 50 且无上限）
+        val limit = (get("limit")?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
+        // ★ 时间预算必须小于调用方超时(§4: 资源库聚合给单 peer 8s)，否则「永远超时」
+        val rd = EngineSearchController.search(
+            mapOf("key" to listOf(q)), timeoutSec = SPEC_SEARCH_TIMEOUT_SEC)
+        if (!rd.isSuccess) return json(502, errSpec("UPSTREAM_FAIL", rd.errorMsg ?: "搜索失败"))
         @Suppress("UNCHECKED_CAST")
         val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
         val arr = JSONArray()
@@ -164,13 +222,14 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("ref", bookUrl))
             n++
         }
-        return json(200, okSpec(arr))
+        // §8 分页三件套: 引擎一轮返回全量, 故 cursor="" + hasMore=false
+        return json(200, okSpec(arr, pageMeta(n)))
     }
 
     private fun specToc(module: String, get: (String) -> String?): Response {
         val id = get("id")
         if (id.isNullOrBlank()) return json(400, errSpec("INVALID_REQUEST", "缺参数 id"))
-        val list = loadToc(id) ?: return json(502, errSpec("UPSTREAM_ERROR", "目录获取失败"))
+        val list = loadToc(id) ?: return json(502, errSpec("UPSTREAM_FAIL", "目录获取失败"))
         val arr = JSONArray()
         for (c in list) {
             arr.put(JSONObject()
@@ -178,7 +237,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("name", c.title)
                 .put("index", c.index))
         }
-        return json(200, okSpec(arr))
+        return json(200, okSpec(arr, pageMeta(list.size)))
     }
 
     private fun specContent(module: String, get: (String) -> String?): Response {
@@ -194,24 +253,24 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             "novel" -> {
                 val rd = BookController.getBookContent(
                     mapOf("url" to listOf(id), "index" to listOf(index.toString())))
-                if (!rd.isSuccess) json(502, errSpec("UPSTREAM_ERROR", rd.errorMsg ?: "正文获取失败"))
-                else json(200, okSpec(JSONObject().put("text", (rd.data as? String) ?: "")))
+                if (!rd.isSuccess) json(502, errSpec("UPSTREAM_FAIL", rd.errorMsg ?: "正文获取失败"))
+                else json(200, okSpec(JSONObject().put("text", (rd.data as? String) ?: ""), baseMeta()))
             }
             "comic" -> {
                 val loaded = loadRaw(id, index)
-                    ?: return json(502, errSpec("UPSTREAM_ERROR", "图片列表获取失败"))
+                    ?: return json(502, errSpec("UPSTREAM_FAIL", "图片列表获取失败"))
                 val images = runBlocking {
                     runCatching {
                         withTimeoutOrNull(20_000) {
                             BookHelp.flowImages(loaded.chapter, loaded.raw).toList()
                         }
                     }.getOrNull()
-                } ?: return json(502, errSpec("UPSTREAM_ERROR", "图片规则解析失败"))
-                json(200, okSpec(JSONObject().put("images", JSONArray(images))))
+                } ?: return json(502, errSpec("UPSTREAM_FAIL", "图片规则解析失败"))
+                json(200, okSpec(JSONObject().put("images", JSONArray(images)), baseMeta()))
             }
             "music", "video" -> {
                 val loaded = loadRaw(id, index)
-                    ?: return json(502, errSpec("UPSTREAM_ERROR", "播放地址获取失败"))
+                    ?: return json(502, errSpec("UPSTREAM_FAIL", "播放地址获取失败"))
                 val mediaUrl = loaded.raw.trim()
                 // 按官方播放器的方式解析: 章节内容 → AnalyzeUrl → 最终播放地址 + 请求头
                 val analyzed = runBlocking {
@@ -226,13 +285,13 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 }
                 val resolved = analyzed?.url?.takeIf { it.isNotBlank() }
                     ?: mediaUrl.takeIf { it.startsWith("http") }
-                    ?: return json(502, errSpec("UPSTREAM_ERROR", "播放地址解析失败"))
+                    ?: return json(502, errSpec("UPSTREAM_FAIL", "播放地址解析失败"))
                 val header = JSONObject()
                 analyzed?.headerMap?.forEach { (k, v) -> header.put(k, v) }
                 json(200, okSpec(JSONObject()
                     .put("url", resolved)
                     .put("header", header)
-                    .put("variants", JSONArray())))
+                    .put("variants", JSONArray()), baseMeta()))
             }
             else -> json(404, errSpec("UNSUPPORTED", "模块 $module 的内容暂不支持"))
         }
@@ -307,10 +366,19 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val sources = appDb.bookSourceDao.allEnabledExplore
             .filter { it.bookSourceType == wantSourceType && !it.exploreUrl.isNullOrBlank() }
         val items = JSONArray()
+        // ★ 总预算兜底: 发现页要遍历**全部**带 exploreUrl 的源(实测 2060 条),
+        //   旧实现只限单源 8s、不限总量 → 源多时单个请求可跑几分钟, 调用方必然超时。
+        //   这里给总预算, 到点即返回**已收集到的部分结果**(发现页按源累加, 部分可用)。
+        val deadline = System.currentTimeMillis() + DISCOVER_BUDGET_MS
+        var truncated = false
         for (bs in sources) {
-            // exploreKinds 可能执行书源 JS, 单源限时 8s, 失败跳过不影响其他源
+            if (System.currentTimeMillis() >= deadline) {
+                truncated = true
+                break
+            }
+            // exploreKinds 可能执行书源 JS, 单源限时 3s, 失败跳过不影响其他源
             val kinds = runBlocking {
-                withTimeoutOrNull(8_000) { runCatching { bs.exploreKinds() }.getOrNull() }
+                withTimeoutOrNull(3_000) { runCatching { bs.exploreKinds() }.getOrNull() }
             } ?: continue
             val tags = JSONArray()
             for (k in kinds) {
@@ -326,6 +394,8 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         return json(200, JSONObject()
             .put("object", "list")
             .put("items", items)
+            .put("truncated", truncated)
+            .put("total", sources.size)
             .put("data", JSONObject().put("items", items)))
     }
 
@@ -446,12 +516,29 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     // ─────────────────────────── 响应封装 ───────────────────────────
 
-    private fun okSpec(data: Any) = JSONObject().put("ok", true).put("data", data)
+    /**
+     * THP §3.1: 成功信封**必须**含 meta（无分页信息时也要给 {}，不能省字段）。
+     * §3.3 规定 meta.source = 产生数据的 peer 的 instanceId，故这里默认带上本引擎的 instanceId。
+     */
+    private fun okSpec(data: Any, meta: JSONObject? = null) = JSONObject()
+        .put("ok", true)
+        .put("data", data)
+        .put("meta", meta ?: baseMeta())
+
+    private fun baseMeta() = JSONObject().put("source", instanceId)
+
+    /** 分页三件套(§8): cursor + hasMore + total。引擎单轮返回全量 → cursor 空串、hasMore=false */
+    private fun pageMeta(total: Int) = baseMeta()
+        .put("cursor", "")
+        .put("hasMore", false)
+        .put("total", total)
 
     private fun errSpec(code: String, msg: String) = JSONObject()
         .put("ok", false)
         .put("error", JSONObject().put("code", code).put("message", msg))
+        .put("meta", baseMeta())
 
+    /** 旧草稿信封 —— 只给 /thp/search|chapters|content|discover|explore 用, 勿在新端点使用 */
     private fun err(type: String, msg: String) = JSONObject()
         .put("object", "error")
         .put("data", JSONObject().put("type", type).put("message", msg))
@@ -468,6 +555,8 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             }
         val r = newFixedLengthResponse(status, "application/json; charset=utf-8", obj.toString())
         r.addHeader("Access-Control-Allow-Origin", "*")
+        // THP §3.1: 调用方生成 X-TH-Request-Id, peer 必须原样回显(日志追踪链路)
+        requestId.get()?.let { r.addHeader("X-TH-Request-Id", it) }
         return r
     }
 

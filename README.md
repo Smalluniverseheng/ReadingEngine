@@ -25,17 +25,22 @@
 
 ### THP/1 规范端点（推荐）
 
-`module` ∈ `novel` / `comic` / `music` / `video`。响应统一为 `{ok:true, data:…}`，出错为
-`{ok:false, error:{code, message}}`。
+`module` ∈ `novel` / `comic` / `music` / `video`。响应统一为
+`{ok:true, data:…, meta:{…}}`，出错为 `{ok:false, error:{code, message}, meta:{…}}`。
+**失败判断的唯一依据是 `ok:false`**；`meta` 携带分页三件套 `cursor` / `hasMore` / `total`。
+调用方若带 `X-TH-Request-Id` 请求头，引擎会原样回显。
 
 | 端点 | 参数 | data |
 | --- | --- | --- |
-| `GET /thp/meta` | — | `{protocol, instanceId, role, name, version, caps, auth, endpoints, …}` |
+| `GET /thp/meta` | — | `{protocol, instanceId, role, name, version, vendor, caps, auth, remote, endpoints, deprecated, ext}` |
 | `POST /thp/m/{module}/search` | `{q, limit, cursor}` | `[{id, name, author, coverUrl, intro, ref}]` |
 | `POST /thp/m/{module}/toc` | `{id, cursor}` | `[{id, name, index}]` |
 | `POST /thp/m/{module}/content` | `{id, chapterId}` | novel→`{text}` · comic→`{images:[]}` · music/video→`{url, header, variants}` |
 
 以上三个也可用 `GET` 版调用：`?q=` / `?id=` / `?id=&chapterId=`。
+
+约定：`limit` 默认 **20**、上限 **100**（超限自动截断不报错）；搜索在 **7 秒**预算内返回，
+超时则返回已收集到的部分结果（聚合搜索允许部分返回）。
 
 ### 兼容端点（旧草稿，保留以支持老客户端）
 
@@ -47,13 +52,15 @@
 | `GET /thp/discover?type=novel` | 发现页：按书源分组返回分类标签 |
 | `GET /thp/explore?type=novel&source=源URL&url=分类URL&page=1` | 发现列表 |
 
-自动发现：引擎每 5 秒向 UDP `19527` 广播一次
+自动发现：引擎每 30 秒向 UDP `19527` 广播一次，亮屏/解锁后立即补发一次；停止服务时发下线报文。
 
 ```
-THP/1 HELLO <port> <instanceId> engine <caps> <name>
+THP/1 HELLO <port> <instanceId> engine <caps> <name>      # 每 30 秒
+THP/1 BYE <instanceId>                                    # 停止服务时
 ```
 
-`caps` 采用 THP caps 注册表写法（`m:novel,m:comic,m:music,m:video`）。
+`caps` 采用 THP caps 注册表写法（`m:novel,m:comic,m:music,m:video,post-query`）——
+与 `/thp/meta` 返回的 `caps` 保持一致。`instanceId` 为标准 UUID，重启不变。
 
 ## 源码与许可
 

@@ -164,6 +164,8 @@ class WebService : BaseService() {
         isRun = false
         stopServers()
         hostAddress = ""
+        // 引擎随服务一起下线: 发 THP/1 BYE 让局域网前端立即摘掉本引擎(THP §4.1 优雅下线)
+        runCatching { io.legado.app.engine.EngineBeacon.stop() }
         postEvent(EventBus.WEB_SERVICE, "")
         upTile(false)
     }
