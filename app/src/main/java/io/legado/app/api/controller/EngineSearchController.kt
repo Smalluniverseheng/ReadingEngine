@@ -71,6 +71,8 @@ object EngineSearchController {
                 if (!isUsableBookUrl(url)) continue
                 if (!seen.add(url)) continue   // 同书多源/多轮回调产生的重复项
                 if (b.name.isNullOrBlank()) continue
+                // ★ 丢弃「HTTP 错误页被当书」的脏结果（见 isErrorPageName）
+                if (isErrorPageName(b.name)) continue
                 val st = when {
                     b.type and BookType.video != 0 -> 4
                     b.type and BookType.image != 0 -> 2
@@ -99,23 +101,50 @@ object EngineSearchController {
     /**
      * 结果项是否可用作「书 id」。
      *
-     * 必须挡住的实测样本（来自内置源包里的死站源）:
-     *   id  = "https://www.sistxt.net/search/,{\n\t\"method\":\"POST\",\n\t\"body\":\"searchkey=测试\"\n\t}"
-     *   name= "404 Not Found"
-     * 这串 id 不是 URL，而是 Legado 的 POST 记法 URL + 规则 JSON 原文，
-     * 经 THP 端点原样吐给前端后：点不开（不是合法 URL）、且把书源规则内容泄漏到协议层。
-     * 产生路径见 WebBook.searchBookAwait（现已拦 4xx/5xx）与 BookList 的「按详情页解析」兜底。
-     * 这里做协议边界的最后一道闸：不是干净 URL 的一律不进结果集。
+     * ★ Legado 的 POST 源把请求方式写在 searchUrl 里，整串形如
+     *     `https://site/search/,{"method":"POST","body":"searchkey=xx"}`
+     * 这是**合法且必需**的 —— 取目录/正文时 Legado 靠结尾这段 JSON 才知道要发 POST。
+     * 因此只校验逗号前的 **URL 部分**，不能因为整串里出现 `{` / `"` 就丢弃：
+     * 上一版正是那样写的，会把所有 POST 源的搜索结果**整片误杀**（实测死站源
+     * `https://www.sistxt.net/search/,{…}` 的全部条目被丢光，等于把「有一堆结果」
+     * 变成「一条都没有」，比不修更糟）。
+     *
+     * 真正要挡的是「HTTP 错误页被当成书」这类脏结果。实测样本：
+     *   id   = "https://www.sistxt.net/search/,{…}"   ← URL 部分是合法的，拦不住
+     *   name = "404 Not Found"                        ← 破绽在 name，交给 [isErrorPageName]
+     * 其产生路径见 WebBook.searchBookAwait（现已拦 4xx/5xx，从源头不再产出）。
      */
     private fun isUsableBookUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return false
-        // URL 里不该出现这些字符（未展开的模板/规则原文/换行）
-        for (c in url) {
-            if (c == ' ' || c == '\n' || c == '\r' || c == '\t' ||
-                c == '{' || c == '}' || c == '"' || c == '\'' || c == '\\'
-            ) return false
+        val head = url.substringBefore(",{").trim()
+        if (head.isEmpty()) return false
+        if (!head.startsWith("http://", true) && !head.startsWith("https://", true)) return false
+        // URL 部分不该出现空白（未展开的模板 / 被拼接进来的规则片段）
+        for (c in head) {
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') return false
         }
         return true
+    }
+
+    /**
+     * 书名是否是 HTTP 错误页标题。**精确匹配**为主，避免误伤正常书名。
+     * 兜住 WebBook 那道闸漏下来的（例如源站返回 200 但内容是错误页）。
+     */
+    private val ERROR_PAGE_TITLES = setOf(
+        "404 not found", "403 forbidden", "401 unauthorized", "400 bad request",
+        "500 internal server error", "502 bad gateway", "503 service unavailable",
+        "504 gateway time-out", "504 gateway timeout",
+        "just a moment...", "attention required! | cloudflare",
+        "access denied", "not found", "page not found",
+        "页面不存在", "出错啦", "错误",
+    )
+
+    private fun isErrorPageName(name: String?): Boolean {
+        val n = name?.trim()?.lowercase() ?: return false
+        if (n.isEmpty()) return false
+        if (ERROR_PAGE_TITLES.contains(n)) return true
+        // "404 Not Found - 站点名" / "403 Forbidden | xxx" 这类带后缀的
+        return n.startsWith("404 ") || n.startsWith("403 ") ||
+            n.startsWith("502 ") || n.startsWith("503 ")
     }
 }

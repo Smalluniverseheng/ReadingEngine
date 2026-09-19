@@ -76,6 +76,21 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         /** 请求体上限。自己读原始字节就绕过了 NanoHTTPD 的体积保护，故在此补一道。 */
         private const val MAX_BODY_BYTES = 1 * 1024 * 1024
 
+        /**
+         * HTTP 错误页标题（小写，精确匹配）。
+         * 源站/死站把 404 页返回给我们时，Legado 会把页面标题当成书名，
+         * 结果集里就会出现一堆 name="404 Not Found" 的"书"。仅按 name 精确匹配剔除，
+         * 避免误伤正常书名。与 EngineSearchController.ERROR_PAGE_TITLES 保持一致。
+         */
+        private val ERROR_PAGE_TITLES = setOf(
+            "404 not found", "403 forbidden", "401 unauthorized", "400 bad request",
+            "500 internal server error", "502 bad gateway", "503 service unavailable",
+            "504 gateway time-out", "504 gateway timeout",
+            "just a moment...", "attention required! | cloudflare",
+            "access denied", "not found", "page not found",
+            "页面不存在", "出错啦", "错误",
+        )
+
         private var instance: ThpServer? = null
 
         /** 模块名 → legado 书源类型(THP §6.1) */
@@ -218,6 +233,8 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             val bookUrl = (b["bookUrl"] as? String) ?: continue
             // 协议边界最后一道闸: 不干净的书 id 不出 THP(理由见 isUsableBookUrl)
             if (!isUsableBookUrl(bookUrl)) continue
+            // 错误页被当书的脏结果(理由见 isErrorPageName)
+            if (isErrorPageName(b["name"] as? String)) continue
             if (!seen.add(bookUrl)) continue
             cachePut(bookUrl, b)
             arr.put(JSONObject()
@@ -322,6 +339,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             if (st != wantType) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
             if (!isUsableBookUrl(bookUrl)) continue
+            if (isErrorPageName(b["name"] as? String)) continue
             if (!seen.add(bookUrl)) continue
             cachePut(bookUrl, b)
             items.put(JSONObject()
@@ -431,6 +449,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             }
             val bookUrl = sb.bookUrl
             if (bookUrl.isBlank()) continue
+            // 与搜索同一套协议边界闸（发现页同样会把错误页/脏 id 带出来）
+            if (!isUsableBookUrl(bookUrl)) continue
+            if (isErrorPageName(sb.name)) continue
             cachePut(bookUrl, mapOf(
                 "name" to sb.name, "author" to (sb.author ?: ""),
                 "kind" to (sb.kind ?: ""), "coverUrl" to (sb.coverUrl ?: ""),
@@ -520,26 +541,38 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
     /**
      * 结果项能否作为 THP 的「书 id」暴露出去。
      *
-     * 必须挡住的实测样本（内置源包里的死站源）:
+     * ★ 曾经挡错的样本（内置源包里的死站源）:
      *   id   = "https://www.sistxt.net/search/,{\n\t\"method\":\"POST\",\n\t\"body\":\"searchkey=测试\"\n\t}"
      *   name = "404 Not Found"
-     * 这串 id 根本不是 URL，而是 Legado 的 POST 记法 searchUrl（"url,{json}"）+ 规则原文。
-     * 它会经 THP 原样吐给前端：前端拿去请求必然失败，且把书源规则内容泄漏到了协议层。
+     * 上一版看到 id 里有 `{` `"` 就整条丢弃 —— 但结尾那段 JSON 是 Legado 的 **POST 记法**，
+     * 合法且必需（取目录/正文要靠它判定发 POST）。照上一版写，会把**所有** POST 源的
+     * 搜索结果整片误杀。正确做法是只校验逗号前的 URL 部分。
      *
-     * 产生路径有两处，均已修：
-     *   1. WebBook.searchBookAwait 现在拦 4xx/5xx（错误页不再进入书单解析）；
-     *   2. EngineSearchController 的 isUsableBookUrl 过滤 + 去重。
-     * 这里再做一次，是因为 THP 是跨进程契约边界，不能假设上游一定干净。
+     * 「错误页被当书」这个真正的脏数据由两处负责，这里不再用 id 去猜：
+     *   1. WebBook.searchBookAwait 拦 4xx/5xx（源头不再产出）；
+     *   2. [isErrorPageName] 按 name 精确匹配兜底。
      */
     private fun isUsableBookUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return false
-        for (c in url) {
-            if (c == ' ' || c == '\n' || c == '\r' || c == '\t' ||
-                c == '{' || c == '}' || c == '"' || c == '\'' || c == '\\'
-            ) return false
+        val head = url.substringBefore(",{").trim()
+        if (head.isEmpty()) return false
+        if (!head.startsWith("http://", true) && !head.startsWith("https://", true)) return false
+        for (c in head) {
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') return false
         }
         return true
+    }
+
+    /**
+     * 书名是否是 HTTP 错误页标题。THP 是跨进程契约边界，不能假设上游一定干净，
+     * 故在引擎与控制器两侧各拦一次（规则需保持一致）。
+     */
+    private fun isErrorPageName(name: String?): Boolean {
+        val n = name?.trim()?.lowercase() ?: return false
+        if (n.isEmpty()) return false
+        if (ERROR_PAGE_TITLES.contains(n)) return true
+        return n.startsWith("404 ") || n.startsWith("403 ") ||
+            n.startsWith("502 ") || n.startsWith("503 ")
     }
 
     /**
@@ -556,20 +589,32 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
      * 读满 Content-Length 字节与原 `parseBody()` 的消费量一致，keep-alive 语义不变
      * （NanoHTTPD 的 `execute()` 只 skip 请求头，不会替我们排空 body）。
      */
-    private fun readJsonBody(session: IHTTPSession): JSONObject? = runCatching {
+    private fun readJsonBody(session: IHTTPSession): JSONObject? {
         val len = session.headers?.get("content-length")?.trim()?.toIntOrNull() ?: 0
-        if (len <= 0 || len > MAX_BODY_BYTES) return@runCatching null
-        val buf = ByteArray(len)
-        val ins = session.inputStream
-        var off = 0
-        while (off < len) {
-            val n = ins.read(buf, off, len - off)
-            if (n <= 0) break
-            off += n
+        if (len in 1..MAX_BODY_BYTES) {
+            return runCatching {
+                val buf = ByteArray(len)
+                val ins = session.inputStream
+                var off = 0
+                while (off < len) {
+                    val n = ins.read(buf, off, len - off)
+                    if (n <= 0) break
+                    off += n
+                }
+                val text = String(buf, 0, off, Charsets.UTF_8).trim()
+                if (text.isEmpty()) null else JSONObject(text)
+            }.getOrNull()
         }
-        val text = String(buf, 0, off, Charsets.UTF_8).trim()
-        if (text.isEmpty()) null else JSONObject(text)
-    }.getOrNull()
+        // 没有 Content-Length（如 Transfer-Encoding: chunked）→ 退回 NanoHTTPD 原生解析。
+        // 这条路多字节字符仍可能被按 US-ASCII 损坏，但总好过直接判成"缺参数"。
+        // 实测 thp-check / v2 / v4 后端的 fetch 都会带 Content-Length，故属兜底分支。
+        return runCatching {
+            val map = HashMap<String, String>()
+            session.parseBody(map)
+            val text = map["postData"]?.trim()
+            if (text.isNullOrEmpty()) null else JSONObject(text)
+        }.getOrNull()
+    }
 
     // ─────────────────────────── 响应封装 ───────────────────────────
 
