@@ -34,10 +34,11 @@ import java.util.concurrent.ConcurrentHashMap
  *   module ∈ novel | comic | music | video
  *
  * 兼容端点(旧草稿, 保留以支持老客户端):
- *   GET /thp/search?type=novel&q=…            → {object:"list",data:{items:[…]}}
+ *   GET /thp/search?type=…&q=…[&page=&limit=&budget=]  → {object:"list",data:{items:[…]}} + page/limit/total/hasMore
+ *          type 支持 all(一次扫描返回全部类型, 每项带 type 字段); budget=扫描预算秒数(首屏可给小值提速)
  *   GET /thp/chapters?type=…&id=…             → 同上
  *   GET /thp/content?type=…&id=…&chapter=…    → {object:"novel-content",data:{text}}
- *   GET /thp/discover?type=…                  → 发现页: 各书源的分类标签
+ *   GET /thp/discover?type=…                  → 发现页: 各书源的分类标签(已过滤空 url)
  *   GET /thp/explore?type=…&source=…&url=…&page=… → 发现列表
  *
  * 搜索/目录/正文全部委托 Legado 本体(EngineSearchController / BookController / WebBook),
@@ -72,6 +73,34 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
         /** discover/explore 遍历全部源的总预算(ms)，防止"源多时单个请求跑几分钟" */
         private const val DISCOVER_BUDGET_MS = 12_000L
+
+        /**
+         * 兼容端点 /thp/search 的扫描预算(秒)。默认沿用 EngineSearchController 的 25s。
+         * 调用方可传 budget=8 之类的小值换「首屏更快」：一次扫描的耗时几乎全由预算决定，
+         * 而 8s 通常已能拿到大部分源的结果 —— 这是前端做「瀑布流首屏」的关键旋钮。
+         */
+        private const val SEARCH_BUDGET_DEFAULT_SEC = 25L
+        private const val SEARCH_BUDGET_MIN_SEC = 5L
+        private const val SEARCH_BUDGET_MAX_SEC = 60L
+
+        /**
+         * 搜索结果短期缓存。★这是「加载更多/瀑布流」成立的前提：
+         * 一次全源扫描要 20s+，翻页时**绝不能重扫**，否则每次翻页都要再等 20s。
+         * 键 = "<type>|<q>"，值为该次扫描的**去重后完整列表**，翻页只是切片。
+         * truncated 为真表示该次扫描被预算截断 —— 此时允许调用方用更大的 budget 重扫覆盖缓存。
+         */
+        private data class SearchCache(
+            val items: JSONArray,
+            val createdAt: Long,
+            val budgetSec: Long,
+            val truncated: Boolean,
+            val scannedSources: Int,
+            val totalSources: Int,
+        )
+
+        private val SEARCH_CACHE = ConcurrentHashMap<String, SearchCache>()
+        private const val SEARCH_CACHE_TTL_MS = 10 * 60 * 1000L
+        private const val SEARCH_CACHE_MAX = 8
 
         /** 请求体上限。自己读原始字节就绕过了 NanoHTTPD 的体积保护，故在此补一道。 */
         private const val MAX_BODY_BYTES = 1 * 1024 * 1024
@@ -323,20 +352,101 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     // ─────────────────────────── 兼容端点 ───────────────────────────
 
+    /**
+     * 兼容端点搜索。**支持分页**，供前端做「持续瀑布流」：
+     *
+     *   GET /thp/search?type=novel&q=剑来&page=1&limit=40&budget=8
+     *
+     * - type: novel | comic | music | video | **all**
+     *   all = 一次扫描就把所有类型一起返回（每项带 type 字段）。
+     *   旧调用方按类型逐个请求时要扫 4 遍，同一份工作量做 4 次；all 只做 1 次。
+     * - page/limit: 基于**该次扫描的完整结果**切片，翻页不重扫（见 SEARCH_CACHE）。
+     * - budget: 扫描时间预算(秒)。首屏用小值(如 8s)快速出结果，靠翻页预算更大再加深。
+     *
+     * 响应仍是旧草稿形状（object/items/data），另在顶层补 page/limit/total/hasMore/
+     * truncated/budgetSec 供调用方翻页；多出的键对旧调用方无影响。
+     */
     private fun search(parms: Map<String, String>): Response {
         val q = parms["q"]?.trim()
         val type = parms["type"] ?: "novel"
         if (q.isNullOrEmpty()) return json(400, err("invalid_request", "缺参数 q"))
-        val wantType = MODULES[type] ?: 0
-        val rd = EngineSearchController.search(mapOf("key" to listOf(q)))
-        if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "搜索失败"))
+        val all = type == "all"
+        val wantType = if (all) -1 else (MODULES[type] ?: 0)
+        val page = (parms["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
+        val limit = (parms["limit"]?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
+        val budgetSec = (parms["budget"]?.toLongOrNull() ?: SEARCH_BUDGET_DEFAULT_SEC)
+            .coerceIn(SEARCH_BUDGET_MIN_SEC, SEARCH_BUDGET_MAX_SEC)
+
+        val cacheKey = "$type|$q"
+        val now = System.currentTimeMillis()
+        var cache = SEARCH_CACHE[cacheKey]?.takeIf { now - it.createdAt <= SEARCH_CACHE_TTL_MS }
+
+        // 何时必须重扫：
+        //  ① 第一页永远重扫（用户要的是"再搜一次"的新结果，不能喂旧缓存）
+        //  ② 无缓存（翻页时缓存过期 → 直接告诉调用方重搜，别在这儿白等 25s）
+        //  ③ 缓存是被截断的，且这次预算更大 → 值得为"加载更多"再扫一轮更深的
+        val deeper = cache != null && cache.truncated && budgetSec > cache.budgetSec
+        val needSweep = page == 1 || cache == null || deeper
+
+        if (page > 1 && cache == null) {
+            return json(409, err("no_cache", "上次搜索结果已过期（缓存 10 分钟），请重新搜索"))
+        }
+
+        if (needSweep) {
+            val swept = sweepSearch(q, wantType, budgetSec) ?: return json(502, err("source_error", "搜索失败"))
+            cache = swept
+            SEARCH_CACHE[cacheKey] = swept
+            // 简单清理：超量时丢掉最旧的一半，避免长驻进程里无限增长
+            if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
+                SEARCH_CACHE.entries
+                    .sortedBy { it.value.createdAt }
+                    .take(SEARCH_CACHE.size - SEARCH_CACHE_MAX / 2)
+                    .forEach { SEARCH_CACHE.remove(it.key) }
+            }
+        }
+
+        // 走到这里 cache 必非空（page>1 且 null 已在上面 409 返回）；取值一次，避免可空推断
+        val c = cache ?: return json(409, err("no_cache", "搜索结果不可用，请重新搜索"))
+        val full = c.items
+        val n = full.length()
+        val from = ((page - 1).toLong() * limit).toInt()
+        if (from >= n) {
+            // 页码超出：返回空页而不是报错，调用方据此停止加载
+            return json(200, JSONObject()
+                .put("object", "list").put("items", JSONArray())
+                .put("data", JSONObject().put("items", JSONArray()))
+                .put("page", page).put("limit", limit).put("total", n)
+                .put("hasMore", false).put("truncated", c.truncated)
+                .put("budgetSec", c.budgetSec)
+                .put("scannedSources", c.scannedSources)
+                .put("totalSources", c.totalSources))
+        }
+        val slice = JSONArray()
+        for (i in from until minOf(from + limit, n)) slice.put(full.get(i))
+        return json(200, JSONObject()
+            .put("object", "list")
+            // 顶层扁平数组: v2/v4 后端降级归一化优先读 j.items, 缺了会把 j.data 当数组用而抛错
+            .put("items", slice)
+            .put("data", JSONObject().put("items", slice))
+            .put("page", page).put("limit", limit).put("total", n)
+            .put("hasMore", from + limit < n)
+            .put("truncated", c.truncated)
+            .put("budgetSec", c.budgetSec)
+            .put("scannedSources", c.scannedSources)
+            .put("totalSources", c.totalSources))
+    }
+
+    /** 跑一轮全源扫描并归一化。wantType = -1 表示不限类型（type=all）。 */
+    private fun sweepSearch(q: String, wantType: Int, budgetSec: Long): SearchCache? {
+        val rd = EngineSearchController.search(mapOf("key" to listOf(q)), budgetSec)
+        if (!rd.isSuccess) return null
         @Suppress("UNCHECKED_CAST")
         val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
         val items = JSONArray()
         val seen = HashSet<String>()
         for (b in raw) {
             val st = (b["sourceType"] as? Int) ?: 0
-            if (st != wantType) continue
+            if (wantType >= 0 && st != wantType) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
             if (!isUsableBookUrl(bookUrl)) continue
             if (isErrorPageName(b["name"] as? String)) continue
@@ -348,13 +458,24 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("author", b["author"] ?: "")
                 .put("coverUrl", b["coverUrl"] ?: "")
                 .put("intro", (b["intro"] as? String ?: "").take(200))
-                .put("kind", b["kind"] ?: ""))
+                .put("kind", b["kind"] ?: "")
+                // ★ type=all 时调用方要靠这两个字段把结果分回各模块
+                .put("type", st)
+                .put("typeName", when (st) {
+                    0 -> "text"; 1 -> "audio"; 2 -> "image"; 4 -> "video"; else -> "unknown"
+                })
+                .put("sourceName", b["originName"] ?: ""))
         }
-        return json(200, JSONObject()
-            .put("object", "list")
-            // 顶层扁平数组: v2/v4 后端降级归一化优先读 j.items, 缺了会把 j.data 当数组用而抛错
-            .put("items", items)
-            .put("data", JSONObject().put("items", items)))
+        // 预算是否用满：实际扫完的源数 < 参与的源总数 → 还有源没跑完，结果还会增长
+        val truncated = EngineSearchController.lastTruncated
+        return SearchCache(
+            items = items,
+            createdAt = System.currentTimeMillis(),
+            budgetSec = budgetSec,
+            truncated = truncated,
+            scannedSources = EngineSearchController.lastScannedSources,
+            totalSources = EngineSearchController.lastTotalSources,
+        )
     }
 
     private fun chapters(parms: Map<String, String>): Response {
@@ -410,7 +531,11 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             } ?: continue
             val tags = JSONArray()
             for (k in kinds) {
-                val u = k.url ?: continue
+                // ★ 必须同时过滤 null 与**空串**。旧实现只判 `k.url ?: continue`，
+                //   而空串是"存在但没用"：标签会照常出现在发现页 UI 上，用户一点
+                //   就带着 url="" 去调 /thp/explore，引擎必回 400 —— 前端看到的
+                //   「发现页有分类但点进去就报错」就是这个。空白串同理（trim 后判空）。
+                val u = k.url?.trim()?.takeIf { it.isNotEmpty() } ?: continue
                 tags.put(JSONObject().put("name", k.title).put("url", u))
             }
             if (tags.length() == 0) continue

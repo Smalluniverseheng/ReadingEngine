@@ -25,6 +25,26 @@ object EngineSearchController {
     const val DEFAULT_TIMEOUT_SEC = 25L
 
     /**
+     * 上一轮 search() 的扫描统计：已扫完的源数 / 本轮参与的源总数。
+     *
+     * 存在的理由：`search()` 到时返回的是**预算内的部分结果**，但调用方从返回列表上
+     * 看不出"是全网就这些，还是只扫了一半就被预算截断了"。ThpServer 需要这个信号来
+     * 决定 `truncated` 并据此告诉前端「还能加载更多（可用更大的 budget 再扫深一点）」。
+     * 单进程内被连续调用会互相覆盖，只用于"最近一轮"的展示，不参与正确性判断。
+     */
+    @Volatile
+    var lastScannedSources: Int = 0
+        private set
+
+    @Volatile
+    var lastTotalSources: Int = 0
+        private set
+
+    /** 结果是否被预算截断（还有源没扫完）。 */
+    val lastTruncated: Boolean
+        get() = lastTotalSources > 0 && lastScannedSources < lastTotalSources
+
+    /**
      * @param timeoutSec 搜索时间预算(秒)。到时返回**已收集到的部分结果**（聚合搜索允许部分返回），
      *   而不是报错 —— THP §4 明确「你的引擎慢了只会被跳过」，返回部分结果远好于整体超时。
      *   THP 规范端点按调用方 8s 预算传入更小的值(见 ThpServer.SPEC_SEARCH_TIMEOUT_SEC)。
@@ -35,6 +55,8 @@ object EngineSearchController {
     ): ReturnData {
         val key = parameters["key"]?.firstOrNull()?.trim()
         if (key.isNullOrEmpty()) return ReturnData().setErrorMsg("参数key不能为空")
+        lastScannedSources = 0
+        lastTotalSources = 0
         // ★ 用「最新快照」而不是「追加」。
         // SearchModel 每次 onSearchSuccess 传的是**累计**列表（见 SearchModel.startSearch:
         // mergeItems(items,…) 之后再 callBack.onSearchSuccess(searchBooks)）。
@@ -47,7 +69,10 @@ object EngineSearchController {
         val callBack = object : SearchModel.CallBack {
             override fun getSearchScope(): SearchScope = SearchScope(AppConfig.searchScope)
             override fun onSearchStart() {}
-            override fun onSearchProgress(searched: Int, total: Int) {}
+            override fun onSearchProgress(searched: Int, total: Int) {
+                lastScannedSources = searched
+                lastTotalSources = total
+            }
             override fun onSearchSuccess(searchBooks: List<SearchBook>) {
                 snapshot.set(ArrayList(searchBooks))
             }
