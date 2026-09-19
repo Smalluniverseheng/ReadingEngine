@@ -100,6 +100,17 @@ object WebBook {
             }
         }
         checkRedirect(bookSource, res)
+        // ★ HTTP 错误响应不是搜索结果页，必须直接判失败。
+        // 背景: BookList.analyzeBookList 在「bookList 规则命中为空 且 源未声明 bookUrlPattern」时
+        // 会 fallback 成「按详情页解析」(BookList.kt 的 "列表为空,按详情页解析" 分支)，
+        // 从错误页里**伪造**出一条书：bookUrl = 本次请求 URL(即 searchUrl 原文，
+        // 含 Legado POST 记法 "url,{json}" 的整串规则文本)、name = 页面标题。
+        // 实测死站源因此产出 name="404 Not Found"、id 泄漏 ruleSearch 原文的垃圾条目，
+        // THP 端点又把它当正常结果返回给前端 —— 搜索「有结果但点不开」。
+        // 放到 BookList 之前拦，是因为 4xx/5xx 页面上任何规则解析都没有意义。
+        if (!res.isSuccessful()) {
+            throw NoStackTraceException("HTTP ${res.code()} ${res.message()}")
+        }
         BookList.analyzeBookList(
             bookSource = bookSource,
             ruleData = ruleData,

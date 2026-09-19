@@ -73,6 +73,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         /** discover/explore 遍历全部源的总预算(ms)，防止"源多时单个请求跑几分钟" */
         private const val DISCOVER_BUDGET_MS = 12_000L
 
+        /** 请求体上限。自己读原始字节就绕过了 NanoHTTPD 的体积保护，故在此补一道。 */
+        private const val MAX_BODY_BYTES = 1 * 1024 * 1024
+
         private var instance: ThpServer? = null
 
         /** 模块名 → legado 书源类型(THP §6.1) */
@@ -207,11 +210,15 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
         val arr = JSONArray()
         var n = 0
+        val seen = HashSet<String>()
         for (b in raw) {
             if (n >= limit) break
             val st = (b["sourceType"] as? Int) ?: 0
             if (st != MODULES[module]) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
+            // 协议边界最后一道闸: 不干净的书 id 不出 THP(理由见 isUsableBookUrl)
+            if (!isUsableBookUrl(bookUrl)) continue
+            if (!seen.add(bookUrl)) continue
             cachePut(bookUrl, b)
             arr.put(JSONObject()
                 .put("id", bookUrl)
@@ -309,10 +316,13 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         @Suppress("UNCHECKED_CAST")
         val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
         val items = JSONArray()
+        val seen = HashSet<String>()
         for (b in raw) {
             val st = (b["sourceType"] as? Int) ?: 0
             if (st != wantType) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
+            if (!isUsableBookUrl(bookUrl)) continue
+            if (!seen.add(bookUrl)) continue
             cachePut(bookUrl, b)
             items.put(JSONObject()
                 .put("id", bookUrl)
@@ -507,11 +517,58 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         if (searchCache.size > 500) searchCache.remove(searchCache.keys.first())
     }
 
+    /**
+     * 结果项能否作为 THP 的「书 id」暴露出去。
+     *
+     * 必须挡住的实测样本（内置源包里的死站源）:
+     *   id   = "https://www.sistxt.net/search/,{\n\t\"method\":\"POST\",\n\t\"body\":\"searchkey=测试\"\n\t}"
+     *   name = "404 Not Found"
+     * 这串 id 根本不是 URL，而是 Legado 的 POST 记法 searchUrl（"url,{json}"）+ 规则原文。
+     * 它会经 THP 原样吐给前端：前端拿去请求必然失败，且把书源规则内容泄漏到了协议层。
+     *
+     * 产生路径有两处，均已修：
+     *   1. WebBook.searchBookAwait 现在拦 4xx/5xx（错误页不再进入书单解析）；
+     *   2. EngineSearchController 的 isUsableBookUrl 过滤 + 去重。
+     * 这里再做一次，是因为 THP 是跨进程契约边界，不能假设上游一定干净。
+     */
+    private fun isUsableBookUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return false
+        for (c in url) {
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t' ||
+                c == '{' || c == '}' || c == '"' || c == '\'' || c == '\\'
+            ) return false
+        }
+        return true
+    }
+
+    /**
+     * 解析 POST 的 JSON body。
+     *
+     * ★ 不用 NanoHTTPD 的 `parseBody()`，因为它按 `Content-Type` 里声明的 charset 解码
+     * （`ContentType.getEncoding()` 无 charset 时返回 **US-ASCII**，见 nanohttpd 2.3.1 字节码），
+     * 而 JSON 按 RFC 8259 **恒为 UTF-8**。于是调用方只要发
+     * `Content-Type: application/json`（不带 charset）—— 这正是 v2/v4 后端 `thp1.js` 的写法 ——
+     * 多字节字符会被 US-ASCII 解码器逐一替换成 U+FFFD（**有损，不可逆**）。
+     * 实测：中文搜索词「测试」到引擎后变成 "������"，即中文搜索整体失效。
+     *
+     * 这里改为自己按 Content-Length 读原始字节、强制 UTF-8 解码。
+     * 读满 Content-Length 字节与原 `parseBody()` 的消费量一致，keep-alive 语义不变
+     * （NanoHTTPD 的 `execute()` 只 skip 请求头，不会替我们排空 body）。
+     */
     private fun readJsonBody(session: IHTTPSession): JSONObject? = runCatching {
-        // NanoHTTPD: parseBody 会把 POST 正文放进 files["postData"]
-        val files = HashMap<String, String>()
-        session.parseBody(files)
-        JSONObject(files["postData"]?.takeIf { it.isNotBlank() } ?: "{}")
+        val len = session.headers?.get("content-length")?.trim()?.toIntOrNull() ?: 0
+        if (len <= 0 || len > MAX_BODY_BYTES) return@runCatching null
+        val buf = ByteArray(len)
+        val ins = session.inputStream
+        var off = 0
+        while (off < len) {
+            val n = ins.read(buf, off, len - off)
+            if (n <= 0) break
+            off += n
+        }
+        val text = String(buf, 0, off, Charsets.UTF_8).trim()
+        if (text.isEmpty()) null else JSONObject(text)
     }.getOrNull()
 
     // ─────────────────────────── 响应封装 ───────────────────────────
