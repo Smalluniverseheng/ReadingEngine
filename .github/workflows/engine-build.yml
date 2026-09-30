@@ -97,7 +97,7 @@ jobs:
             -PRELEASE_STORE_PASSWORD="$ENGINE_STORE_PASSWORD" \
             -PRELEASE_KEY_ALIAS=reading-engine \
             -PRELEASE_KEY_PASSWORD="$ENGINE_KEY_PASSWORD" \
-            --parallel --warning-mode=summary
+            --max-workers=2 --warning-mode=summary
 
       - name: 收集产物
         id: apk
