@@ -5,6 +5,7 @@ import io.legado.app.R
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.engine.EngineProfile
 import io.legado.app.help.config.AppConfig
 import io.legado.app.utils.splitNotBlank
 import splitties.init.appCtx
@@ -138,7 +139,13 @@ data class SearchScope(private var scope: String) {
                 }
             }
         }
-        return list.sortedBy { it.customOrder }
+        // ★ 五产物化：按产物声明的源类型白名单过滤（见 EngineProfile）。
+        //  「小说引擎」不该被拖去扫图片源、「漫画引擎」也不该扫文本源：
+        //   广播 caps 只挡住了 THP 调用方，App 内的搜索/发现走的是这条路径。
+        //   四合一（app）的白名单为空集合 → 不过滤，行为与旧版完全一致。
+        return list
+            .filter { EngineProfile.allowsSourceType(it.bookSourceType) }
+            .sortedBy { it.customOrder }
     }
 
     fun isAll(): Boolean {

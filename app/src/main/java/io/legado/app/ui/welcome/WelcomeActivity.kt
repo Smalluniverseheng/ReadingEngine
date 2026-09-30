@@ -9,6 +9,8 @@ import io.legado.app.constant.PreferKey
 import io.legado.app.constant.Theme
 import io.legado.app.data.appDb
 import io.legado.app.databinding.ActivityWelcomeBinding
+import io.legado.app.engine.EngineActivationActivity
+import io.legado.app.engine.EngineProfile
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.ThemeConfig
 import io.legado.app.lib.theme.accentColor
@@ -42,7 +44,7 @@ open class WelcomeActivity : BaseActivity<ActivityWelcomeBinding>() {
 
     override fun shouldCreateContentView(): Boolean {
         if (broughtToFront || getPrefInt(PreferKey.welcomeShowTime, 500) == 0) {
-            if (!broughtToFront) startMainActivity()
+            if (!broughtToFront) goNext()
             finish()
             return false
         }
@@ -56,11 +58,11 @@ open class WelcomeActivity : BaseActivity<ActivityWelcomeBinding>() {
         } else {
             val welcomeShowTime = getPrefInt(PreferKey.welcomeShowTime, 500)
             if (welcomeShowTime == 0) {
-                startMainActivity()
+                goNext()
             } else {
                 startMainJob = lifecycleScope.launch {
                     delay(welcomeShowTime.toLong())
-                    startMainActivity()
+                    goNext()
                 }
             }
         }
@@ -132,6 +134,21 @@ open class WelcomeActivity : BaseActivity<ActivityWelcomeBinding>() {
             startActivity<ReadBookActivity>()
         }
         finish()
+    }
+
+    /**
+     * 唯一的「离开欢迎页」出口。
+     *
+     * 未激活 → 先走激活页：出厂源要密码才入库，直接放行等于绕过了整个门。
+     * 已激活 → 老行为不变，直接进主界面。
+     */
+    private fun goNext() {
+        if (EngineProfile.activated) {
+            startMainActivity()
+        } else {
+            startActivity<EngineActivationActivity>()
+            finish()
+        }
     }
 
 }

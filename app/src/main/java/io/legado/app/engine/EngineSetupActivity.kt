@@ -13,6 +13,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import io.legado.app.data.appDb
+import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.service.WebService
 import io.legado.app.ui.book.source.manage.BookSourceActivity
 
@@ -71,6 +73,24 @@ class EngineSetupActivity : AppCompatActivity() {
             toast("引擎服务已重新拉起")
         })
 
+        root.addView(sectionTitle("内置源激活"))
+
+        root.addView(actionButton("激活 / 重新解锁内置源") {
+            startActivity(EngineActivationActivity.intentFor(this))
+        })
+
+        root.addView(actionButton("修改激活密码") { showChangePasswordDialog() })
+
+        root.addView(hintText(
+            "· 未激活时内置源不会入库, 局域网内的阅读前端也搜不到任何内容。\n" +
+                "· 出厂默认密码 ${EngineProfile.DEFAULT_PASSWORD}；修改后请自行记牢, " +
+                "忘密码只能卸载重装。\n" +
+                "· 已激活的机器可以直接在下面的书源管理里增删源; " +
+                "本产物只认本类型的源(" +
+                EngineProfile.sourceTypes.sorted().joinToString("/") { typeName(it) } +
+                "), 其他类型会被过滤掉。"
+        ))
+
         root.addView(sectionTitle("使用说明"))
         root.addView(hintText(
             "1. 打开「书源管理」导入书源(本地文件 / 网络导入 / 二维码均可)。\n" +
@@ -85,17 +105,102 @@ class EngineSetupActivity : AppCompatActivity() {
         refreshStatus()
     }
 
+    /**
+     * 可用书源数。-1 = 还没统计出来。
+     * ★不能在 refreshStatus() 里直接查 Room：那个函数每 3 秒跑一次，且跑在主线程，
+     *   Room 默认禁止主线程查询会直接抛 IllegalStateException 崩掉面板。
+     *   改为 onResume 时在 IO 上查一次，面板只负责格式化显示。
+     */
+    private var cachedSourceCount: Int = -1
+
+    override fun onResume() {
+        super.onResume()
+        Coroutine.async {
+            cachedSourceCount = runCatching { appDb.bookSourceDao.allEnabled.size }.getOrDefault(-1)
+        }
+    }
+
     private fun refreshStatus() {
         val host = EngineBeacon.lanHost()
         tvStatus.text = buildString {
             appendLine("引擎服务:  ${if (WebService.isRun) "运行中" else "启动中…"}")
+            appendLine("产物:  ${EngineProfile.displayName}${if (EngineProfile.isAllInOne) "（四合一）" else ""}")
+            appendLine("支持模块:  ${EngineProfile.modules.joinToString(" / ") { moduleName(it) }}")
+            appendLine("激活状态:  ${if (EngineProfile.activated) "已激活" else "未激活 · 内置源不可用"}（${EngineProfile.passwordSource}）")
+            appendLine("可用书源:  ${if (cachedSourceCount < 0) "统计中…" else "$cachedSourceCount 条"}")
             appendLine("局域网地址:  ${EngineBeacon.lanUrl().ifEmpty { "获取中…" }}")
-            appendLine("发现广播:  UDP ${EngineBeacon.BEACON_PORT}   THP/1 HELLO")
-            appendLine("支持内容:  小说 / 漫画 / 听书 / 视频")
+            appendLine("发现广播:  UDP ${EngineBeacon.BEACON_PORT}   THP/1 HELLO   caps=${EngineBeacon.CAPS.ifEmpty { "(未激活, 不广播能力)" }}")
             appendLine("协议版本:  ${ThpServer.VERSION}")
             if (host.isEmpty()) appendLine("提示:  未检测到局域网地址, 请确认已连接 Wi-Fi")
         }
         tvStatus.postDelayed({ if (!isDestroyed) refreshStatus() }, 3000)
+    }
+
+    private fun moduleName(m: String): String = when (m) {
+        "novel" -> "小说"
+        "comic" -> "漫画"
+        "music" -> "音乐"
+        "video" -> "影视"
+        else -> m
+    }
+
+    private fun typeName(t: Int): String = when (t) {
+        0 -> "文本"
+        1 -> "音频"
+        2 -> "图片"
+        3 -> "文件"
+        4 -> "视频"
+        else -> "类型$t"
+    }
+
+    /** 改激活密码：旧密码 + 新密码 + 确认，全部本地校验，不联网。 */
+    private fun showChangePasswordDialog() {
+        val pad = 20.px()
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, 0)
+        }
+        fun field(hint: String) = android.widget.EditText(this).apply {
+            this.hint = hint
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine()
+        }
+        val etOld = field("当前密码")
+        val etNew = field("新密码（4–64 位）")
+        val etRepeat = field("再输一次新密码")
+        box.addView(etOld)
+        box.addView(etNew)
+        box.addView(etRepeat)
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("修改激活密码")
+            .setView(box)
+            .setPositiveButton("保存", null)
+            .setNegativeButton("取消", null)
+            .create()
+            .apply {
+                setOnShowListener {
+                    getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener {
+                            val old = etOld.text.toString()
+                            val n1 = etNew.text.toString()
+                            val n2 = etRepeat.text.toString()
+                            when {
+                                !EngineProfile.verifyPassword(old) -> toast("当前密码不正确")
+                                n1.length < 4 || n1.length > 64 -> toast("新密码需 4–64 位")
+                                n1 != n2 -> toast("两次输入的新密码不一致")
+                                n1 == EngineProfile.DEFAULT_PASSWORD -> toast("新密码不能等于出厂默认密码")
+                                EngineProfile.setPassword(n1) -> {
+                                    toast("密码已更新")
+                                    dismiss()
+                                }
+                                else -> toast("保存失败，请重试")
+                            }
+                        }
+                }
+            }
+            .show()
     }
 
     private fun sectionTitle(t: String): TextView = TextView(this).apply {

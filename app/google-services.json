@@ -153,6 +153,238 @@
           ]
         }
       }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:5ddb50ed24e4f11be78577",
+        "android_client_info": {
+          "package_name": "com.legado.app.novel.release"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:386e20f8996f802a5bf75c",
+        "android_client_info": {
+          "package_name": "com.legado.app.novel.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:591113c5a19d0b02aef9db",
+        "android_client_info": {
+          "package_name": "com.legado.app.comic.release"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:d208440c9de184afedf657",
+        "android_client_info": {
+          "package_name": "com.legado.app.comic.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:4db6fd44fb7fc0e2b9804c",
+        "android_client_info": {
+          "package_name": "com.legado.app.music.release"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:44eca38cb98ff1aac165ae",
+        "android_client_info": {
+          "package_name": "com.legado.app.music.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:b37095619006b359fff6a9",
+        "android_client_info": {
+          "package_name": "com.legado.app.video.release"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620835636521:android:6706963ce7341d3e079f80",
+        "android_client_info": {
+          "package_name": "com.legado.app.video.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXWWvSgBYeQv5VHIzq_I2zrB6IVxIPPv4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "620835636521-2m4f4ft69l27l3njmbtl5hd742phurdf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
     }
   ],
   "configuration_version": "1"

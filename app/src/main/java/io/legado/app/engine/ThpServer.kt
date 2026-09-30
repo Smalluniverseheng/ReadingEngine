@@ -214,20 +214,30 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                     val op = m.groupValues[2]
                     if (!MODULES.containsKey(module)) {
                         json(404, errSpec("NOT_FOUND", "未注册的模块: $module"))
-                    } else when (op) {
-                        "search" -> specSearch(module, get)
-                        "toc" -> specToc(module, get)
-                        "content" -> specContent(module, get)
-                        else -> json(404, errSpec("UNSUPPORTED", "模块 $module 不支持 $op"))
+                    } else if (!EngineProfile.allowsModule(module)) {
+                        // 五产物化：本产物没有这个模块（漫画引擎不该响应 novel）。
+                        // 用 404 而非 403 —— 这是「能力不存在」，不是「权限不够」。
+                        json(404, errSpec("NOT_FOUND",
+                            "${EngineProfile.displayName} 不提供 $module 模块"))
+                    } else {
+                        val blocked = activationBlock(false)
+                        if (blocked != null) {
+                            blocked
+                        } else when (op) {
+                            "search" -> specSearch(module, get)
+                            "toc" -> specToc(module, get)
+                            "content" -> specContent(module, get)
+                            else -> json(404, errSpec("UNSUPPORTED", "模块 $module 不支持 $op"))
+                        }
                     }
                 }
 
                 // ── 兼容端点(旧草稿) ──
-                uri == "/thp/search" -> search(q)
-                uri == "/thp/chapters" -> chapters(q)
-                uri == "/thp/content" -> legacyContent(q)
-                uri == "/thp/discover" -> discover(q)
-                uri == "/thp/explore" -> explore(q)
+                uri == "/thp/search" -> activationBlock(true) ?: search(q)
+                uri == "/thp/chapters" -> activationBlock(true) ?: chapters(q)
+                uri == "/thp/content" -> activationBlock(true) ?: legacyContent(q)
+                uri == "/thp/discover" -> activationBlock(true) ?: discover(q)
+                uri == "/thp/explore" -> activationBlock(true) ?: explore(q)
 
                 // 未知端点也必须是 THP 信封(THP-SDK §6 自测第 4 条)
                 else -> json(404, errSpec("NOT_FOUND", "未知端点"))
@@ -241,21 +251,50 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     // ─────────────────────────── 规范端点 ───────────────────────────
 
-    private fun meta(): Response = json(200, okSpec(JSONObject()
-        .put("protocol", PROTOCOL)
-        .put("instanceId", instanceId)
-        .put("role", "engine")
-        .put("name", EngineBeacon.NAME)
-        .put("version", VERSION)
-        .put("vendor", "reading-engine")
-        // §11 caps: 声明 post-query —— 三个规范端点都实现了 POST 版;
-        // 不声明调用方会按 §7.3 优先 POST 却认为该引擎不支持 POST, 造成能力声明与实际不符。
-        .put("caps", JSONArray().put("m:novel").put("m:comic").put("m:music").put("m:video").put("post-query"))
-        .put("auth", JSONArray().put("none"))
-        .put("remote", false)
-        .put("endpoints", JSONArray().put("search").put("toc").put("content"))
-        .put("deprecated", JSONArray())
-        .put("ext", JSONObject())))
+    private fun meta(): Response {
+        val activated = EngineProfile.activated
+        // 未激活时 caps 故意留空：前端在发现阶段就跳过本引擎，
+        // 而不是连上以后每次都拿到 403 反复重试（THP §11 能力声明即"我能做什么"）。
+        val caps = if (activated) {
+            EngineProfile.caps.fold(JSONArray()) { acc, c -> acc.put(c) }
+        } else {
+            JSONArray()
+        }
+        return json(200, okSpec(JSONObject()
+            .put("protocol", PROTOCOL)
+            .put("instanceId", instanceId)
+            .put("role", "engine")
+            .put("name", EngineBeacon.NAME)
+            .put("version", VERSION)
+            .put("vendor", "reading-engine")
+            .put("caps", caps)
+            .put("auth", JSONArray().put("none"))
+            .put("remote", false)
+            .put("endpoints", JSONArray().put("search").put("toc").put("content"))
+            .put("deprecated", JSONArray())
+            .put("ext", JSONObject()
+                // 出厂能力（无论是否激活都如实上报，便于前端提示"该引擎装了但没解锁"）
+                .put("modules", JSONArray(EngineProfile.modules))
+                .put("engineName", EngineProfile.displayName)
+                .put("allInOne", EngineProfile.isAllInOne)
+                .put("sourceTypes", JSONArray(EngineProfile.sourceTypes.sorted()))
+                .put("activationRequired", !activated))))
+    }
+
+    /**
+     * 激活门：未激活时内置源不可用。
+     *
+     * 只拦**取数据**的端点。`/thp/meta` 必须放行 —— 否则前端连"发现了一个未激活的引擎"
+     * 都做不到，只能显示成"设备离线"，用户看到的现象和"引擎崩了"完全一样。
+     *
+     * 返回 null 表示放行。
+     */
+    private fun activationBlock(legacy: Boolean): Response? {
+        if (EngineProfile.activated) return null
+        val msg = "引擎未激活：请在「${EngineProfile.displayName}」App 内输入激活密码后再使用内置源"
+        return if (legacy) json(403, err("activation_required", msg))
+        else json(403, errSpec("ACTIVATION_REQUIRED", msg))
+    }
 
     private fun specSearch(module: String, get: (String) -> String?): Response {
         val q = (get("q") ?: get("key"))?.trim()
@@ -401,6 +440,26 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val type = parms["type"] ?: "novel"
         if (q.isNullOrEmpty()) return json(400, err("invalid_request", "缺参数 q"))
         val all = type == "all"
+        // 五产物化：只装了一类源的产物，被问到别的类型时直接给空列表。
+        // 不能退化成 wantType=0 —— 那会让「漫画引擎」拿小说类型的源做统计/筛选，
+        // 库里没有文本源，结果是"扫了 0 个源"，调用方却以为搜过了。
+        if (!all && !EngineProfile.allowsModule(type)) {
+            // 形状必须与真成功响应完全一致（object="list" + 顶层扁平 items + data.items）。
+            // 老调用方按下降级链读 `j.items`，形状不对会被当成解析失败而不是"空结果"。
+            return json(200, JSONObject()
+                .put("object", "list")
+                .put("items", JSONArray())
+                .put("data", JSONObject().put("items", JSONArray()))
+                .put("page", 1)
+                .put("limit", DEFAULT_LIMIT)
+                .put("total", 0)
+                .put("hasMore", false)
+                .put("truncated", false)
+                .put("budgetSec", 0)
+                .put("scannedSources", 0)
+                .put("totalSources", 0)
+                .put("note", "${EngineProfile.displayName} 不提供 $type 模块"))
+        }
         val wantType = if (all) -1 else (MODULES[type] ?: 0)
         val page = (parms["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
         val limit = (parms["limit"]?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
@@ -541,6 +600,11 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
     private fun discover(parms: Map<String, String>): Response {
         val type = parms["type"] ?: "novel"
+        if (!EngineProfile.allowsModule(type)) {
+            return json(200, JSONObject().put("object", "discover")
+                .put("data", JSONArray())
+                .put("note", "${EngineProfile.displayName} 不提供 $type 模块"))
+        }
         val wantSourceType = MODULES[type] ?: 0
         val sources = appDb.bookSourceDao.allEnabledExplore
             .filter { it.bookSourceType == wantSourceType && !it.exploreUrl.isNullOrBlank() }

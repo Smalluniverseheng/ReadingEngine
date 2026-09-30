@@ -52,11 +52,16 @@ object EngineBeacon {
      * 本引擎能力(THP caps, 见 docs THP §11 caps 注册表)。
      * ★必须与 ThpServer.meta() 的 caps 保持一致：UDP 广播里的 caps 是前端在**发现之前**
      * 唯一的判据，两者不一致会导致"发现时以为不支持，连上后才发现支持"。
+     *
+     * ★2026-09-30 五产物化：不再硬编码四模块，改为按 productFlavor 注入的
+     * ENGINE_MODULES 生成（见 EngineProfile.caps）。「漫画引擎」只广播 `m:comic`
+     * —— 广播自己做不到的能力，前端会把小说搜索也派过来，而它库里没有文本源，
+     * 表现为"连上了但永远是空结果"。
      */
-    const val CAPS = "m:novel,m:comic,m:music,m:video,post-query"
+    val CAPS: String get() = EngineProfile.capsString
 
-    /** 对外展示名 */
-    const val NAME = "阅读引擎"
+    /** 对外展示名（阅读引擎 / 漫画引擎 / …），来自 productFlavor。 */
+    val NAME: String get() = EngineProfile.displayName
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

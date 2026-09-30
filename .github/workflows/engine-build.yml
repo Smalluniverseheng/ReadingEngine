@@ -1,8 +1,13 @@
 name: engine-build
 
-# 阅读引擎 APK 构建
+# 阅读引擎 APK 构建（五产物）
 # 触发: 推送 engine-v* 标签, 或手动 workflow_dispatch
-# 产物: Release 附件 reading-engine-<版本>.apk (覆盖安装可保留数据, 只要签名一致)
+# 产物: Release 附件 5 个 APK —— 四合一 + 小说/漫画/音乐/视频四个独立 App
+#   reading-engine-<版本>.apk        四合一「阅读引擎」(com.legado.app.release)
+#   reading-engine-novel-<版本>.apk  小说引擎  (com.legado.app.novel.release)
+#   reading-engine-comic-<版本>.apk  漫画引擎  (com.legado.app.comic.release)
+#   reading-engine-music-<版本>.apk  音乐引擎  (com.legado.app.music.release)
+#   reading-engine-video-<版本>.apk  视频引擎  (com.legado.app.video.release)
 on:
   push:
     tags: ['engine-v*']
@@ -41,13 +46,53 @@ jobs:
           fi
           printf '%s' "$ENGINE_KEY_STORE" | base64 --decode > "$GITHUB_WORKSPACE/app/engine.jks"
 
-      - name: 构建 Release APK
+      # 出厂源包是**构建输入**。这里不重新生成（生成脚本会写文件，且依赖本地采集产物），
+      # 只做静态校验：源包存在、非空、类型白名单与本 flavor 声明一致。
+      # 「漫画引擎里装着 3600 条小说源」这种错，光看构建成功是看不出来的。
+      - name: 静态校验出厂源包
+        run: |
+          set -e
+          check_pack() {
+            F="$1"; TYPES="$2"
+            node -e '
+              const fs = require("fs");
+              const f = process.argv[1], types = process.argv[2];
+              const p = `app/src/${f}/assets/defaultData/bookSources.json`;
+              const arr = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (!arr.length) { console.log("::error::" + f + " 出厂源包为空"); process.exit(1); }
+              const allow = types.split(",").map(Number);
+              const bad = arr.filter(s => !allow.includes(s.bookSourceType ?? 0));
+              if (bad.length) {
+                console.log("::error::" + f + " 源包混入 " + bad.length + " 条非本类型源, 例如 " + bad[0].bookSourceName);
+                process.exit(1);
+              }
+              console.log(`  ✓ ${f} 出厂源包 ${arr.length} 条 (启用 ${arr.filter(s=>s.enabled).length}), 类型 [${types}] 通过`);
+            ' "$F" "$TYPES"
+          }
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync("app/src/main/assets/defaultData/bookSources.json","utf8"));
+            if (a.length < 1000) { console.log("::error::main 全量源包异常偏小: " + a.length); process.exit(1); }
+            console.log("  ✓ 四合一全量源包 " + a.length + " 条");
+          '
+          check_pack novel "0,3"
+          check_pack comic "2"
+          check_pack music "1"
+          check_pack video "4"
+
+      - name: 构建五个 Release APK
         env:
           ENGINE_KEY_PASSWORD: ${{ secrets.ENGINE_KEY_PASSWORD }}
           ENGINE_STORE_PASSWORD: ${{ secrets.ENGINE_STORE_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleAppRelease -ParmOnly=true \
+          ./gradlew \
+            :app:assembleAppRelease \
+            :app:assembleNovelRelease \
+            :app:assembleComicRelease \
+            :app:assembleMusicRelease \
+            :app:assembleVideoRelease \
+            -ParmOnly=true \
             -PRELEASE_STORE_FILE=./engine.jks \
             -PRELEASE_STORE_PASSWORD="$ENGINE_STORE_PASSWORD" \
             -PRELEASE_KEY_ALIAS=reading-engine \
@@ -57,43 +102,74 @@ jobs:
       - name: 收集产物
         id: apk
         run: |
-          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
-          test -n "$APK" || { echo "::error::未生成 APK"; exit 1; }
-          OUT="reading-engine-${{ steps.ver.outputs.version }}.apk"
-          cp "$APK" "$OUT"
-          echo "name=$OUT" >> "$GITHUB_OUTPUT"
-          echo "path=$OUT" >> "$GITHUB_OUTPUT"
-          ls -la "$OUT"
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p out
+          cp app/build/outputs/apk/app/release/*.apk      "out/reading-engine-$V.apk"
+          cp app/build/outputs/apk/novel/release/*.apk    "out/reading-engine-novel-$V.apk"
+          cp app/build/outputs/apk/comic/release/*.apk    "out/reading-engine-comic-$V.apk"
+          cp app/build/outputs/apk/music/release/*.apk    "out/reading-engine-music-$V.apk"
+          cp app/build/outputs/apk/video/release/*.apk    "out/reading-engine-video-$V.apk"
+          ls -la out/
+          echo "--- sha256 ---"
+          sha256sum out/*.apk | tee out/SHA256SUMS.txt
 
       - name: 校验产物
         run: |
           set -e
-          APK="${{ steps.apk.outputs.path }}"
           WANT="${{ steps.ver.outputs.version }}"
-          # 与 app/build.gradle 的推导规则保持一致: major*10000 + minor*100 + patch
           EXPECT_VCODE=$(echo "$WANT" | awk -F. '{printf "%d", $1*10000 + $2*100 + $3}')
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "build-tools: $BT | 期望 versionName=$WANT versionCode=$EXPECT_VCODE"
 
-          BADGING=$("$BT/aapt2" dump badging "$APK" 2>/dev/null | head -1)
-          echo "$BADGING"
-          # 1) 版本号必须与 build.gradle 一致(防静默回落)
-          echo "$BADGING" | grep -q "versionName='$WANT'" \
-            || { echo "::error::versionName 不符, 期望 $WANT"; exit 1; }
-          VCODE=$(echo "$BADGING" | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p")
-          [ "$VCODE" = "$EXPECT_VCODE" ] \
-            || { echo "::error::versionCode 不符, 实际 $VCODE 期望 $EXPECT_VCODE"; exit 1; }
+          # flavor → 期望包名 / 允许的源类型（空 = 不过滤）
+          check() {
+            FLAVOR="$1"; PKG="$2"; TYPES="$3"; APK="$4"
+            echo "================ $FLAVOR : $APK ================"
+            BADGING=$("$BT/aapt2" dump badging "$APK" 2>/dev/null | head -1)
+            echo "$BADGING"
 
-          # 2) 必须已签名, 且证书是本仓库密钥(不是上游公开密钥)
-          "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
-          grep -q "CN=Reading Engine" /tmp/certs.txt \
-            || { echo "::error::签名证书不是本仓库密钥, 疑似用了上游公开密钥"; exit 1; }
+            echo "$BADGING" | grep -q "versionName='$WANT'" \
+              || { echo "::error::$FLAVOR versionName 不符, 期望 $WANT"; exit 1; }
+            VCODE=$(echo "$BADGING" | sed -nE "s/.*versionCode='([0-9]+)'.*/\1/p")
+            [ "$VCODE" = "$EXPECT_VCODE" ] \
+              || { echo "::error::$FLAVOR versionCode 不符, 实际 $VCODE 期望 $EXPECT_VCODE"; exit 1; }
+            echo "$BADGING" | grep -q "package: name='$PKG'" \
+              || { echo "::error::$FLAVOR applicationId 不符, 期望 $PKG"; exit 1; }
+            echo "$BADGING" | grep -q "native-code" || { echo "::error::$FLAVOR 缺 native-code"; exit 1; }
 
-          # 3) 关键组件齐全
-          #    注意: 必须 echo "$BADGING" 再管道(直接 "$BADGING" | 会把输出当命令执行)
-          echo "$BADGING" | grep -q "package: name='com.legado.app" || { echo "::error::applicationId 异常"; exit 1; }
-          "$BT/aapt2" dump badging "$APK" | grep -q "native-code" || { echo "::error::缺 native-code"; exit 1; }
-          echo "★ 产物校验通过"
+            "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs_$FLAVOR.txt
+            grep -q "CN=Reading Engine" /tmp/certs_$FLAVOR.txt \
+              || { echo "::error::$FLAVOR 签名证书不是本仓库密钥, 疑似用了上游公开密钥"; exit 1; }
+
+            # ★ 出厂源包必须真的打进包里, 且类型必须与本产物一致。
+            #   「漫画引擎里装着 3600 条小说源」这种错，只有解包才看得出来。
+            node -e '
+              const { execSync } = require("child_process");
+              const flavor = process.argv[1], types = process.argv[2], apk = process.argv[3];
+              const raw = execSync(`unzip -p "${apk}" assets/defaultData/bookSources.json`, { maxBuffer: 1 << 28 }).toString();
+              const arr = JSON.parse(raw);
+              if (!arr.length) { console.log("::error::" + flavor + " 出厂源包为空"); process.exit(1); }
+              if (types) {
+                const allow = types.split(",").map(Number);
+                const bad = arr.filter(s => !allow.includes(s.bookSourceType ?? 0));
+                if (bad.length) {
+                  console.log("::error::" + flavor + " 源包混入 " + bad.length + " 条不允许的类型, 例如 " + bad[0].bookSourceName);
+                  process.exit(1);
+                }
+              }
+              const enabled = arr.filter(s => s.enabled).length;
+              console.log("  ✓ 出厂源包 " + arr.length + " 条 (启用 " + enabled + "), 类型白名单 [" + (types || "全部") + "] 通过");
+            ' "$FLAVOR" "$TYPES" "$APK"
+          }
+
+          check app   "com.legado.app.release"        ""    out/reading-engine-$WANT.apk
+          check novel "com.legado.app.novel.release"  "0,3" out/reading-engine-novel-$WANT.apk
+          check comic "com.legado.app.comic.release"  "2"   out/reading-engine-comic-$WANT.apk
+          check music "com.legado.app.music.release"  "1"   out/reading-engine-music-$WANT.apk
+          check video "com.legado.app.video.release"  "4"   out/reading-engine-video-$WANT.apk
+
+          echo "★ 五个产物全部校验通过"
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
@@ -101,11 +177,28 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('engine-v{0}', steps.ver.outputs.version) }}
           name: 阅读引擎 ${{ steps.ver.outputs.version }}
           body: |
-            阅读引擎 ${{ steps.ver.outputs.version }}
+            阅读引擎 ${{ steps.ver.outputs.version }} —— 五产物版
+
+            | 包 | 应用名 | 包名 | 内置源 |
+            |----|--------|------|--------|
+            | `reading-engine-${{ steps.ver.outputs.version }}.apk` | 阅读引擎（四合一） | com.legado.app.release | 全部类型 |
+            | `reading-engine-novel-${{ steps.ver.outputs.version }}.apk` | 小说引擎 | com.legado.app.novel.release | 文本 + 文件 |
+            | `reading-engine-comic-${{ steps.ver.outputs.version }}.apk` | 漫画引擎 | com.legado.app.comic.release | 图片 |
+            | `reading-engine-music-${{ steps.ver.outputs.version }}.apk` | 音乐引擎 | com.legado.app.music.release | 音频 |
+            | `reading-engine-video-${{ steps.ver.outputs.version }}.apk` | 视频引擎 | com.legado.app.video.release | 视频 |
+
+            五个包可同时安装（包名互不相同），互不覆盖。
 
             - 本地书源解析引擎，局域网内即插即用
-            - 支持小说 / 漫画 / 听书 / 视频
+            - **首次打开需输入激活密码**（出厂默认 `123456`），未激活时内置源不入库、局域网前端搜不到内容
+            - 出厂源已按产物类型切分；实际可搜性取决于源站存活情况
             - 无需账号，不连接任何云端服务
             - THP/1 规范端点：`/thp/meta`、`/thp/m/{module}/search|toc|content`
-          files: ${{ steps.apk.outputs.name }}
+            - 各产物只广播自己支持的模块（`caps`），未激活时 caps 为空数组
+          files: |
+            out/reading-engine-${{ steps.ver.outputs.version }}.apk
+            out/reading-engine-novel-${{ steps.ver.outputs.version }}.apk
+            out/reading-engine-comic-${{ steps.ver.outputs.version }}.apk
+            out/reading-engine-music-${{ steps.ver.outputs.version }}.apk
+            out/reading-engine-video-${{ steps.ver.outputs.version }}.apk
           draft: false

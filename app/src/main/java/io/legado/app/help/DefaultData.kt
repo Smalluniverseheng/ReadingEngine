@@ -8,6 +8,7 @@ import io.legado.app.data.entities.HttpTTS
 import io.legado.app.data.entities.KeyboardAssist
 import io.legado.app.data.entities.RssSource
 import io.legado.app.data.entities.TxtTocRule
+import io.legado.app.engine.EngineProfile
 import io.legado.app.help.config.LocalConfig
 import io.legado.app.help.config.ReadBookConfig
 import io.legado.app.help.config.ThemeConfig
@@ -38,7 +39,11 @@ object DefaultData {
                 if (LocalConfig.needUpDictRule) {
                     importDefaultDictRules()
                 }
-                if (LocalConfig.needUpDefaultBookSource) {
+                // ★ 顺序不能反：`EngineProfile.activated` 必须写在前面。
+                //    `needUpDefaultBookSource` 是**读到即写版本号**的属性（isLastVersion），
+                //    先读它就等于把「已导入」标记写死；未激活的那台机器随后激活也不会再导入，
+                //    表现为「输了密码但还是一个源都没有」。Kotlin 的 && 短路保护了这一点。
+                if (EngineProfile.activated && LocalConfig.needUpDefaultBookSource) {
                     importDefaultBookSources()
                 }
             }.onError {
@@ -157,12 +162,26 @@ object DefaultData {
      * 这样既能保证新装用户发现页非空, 又不会在升级时覆盖用户的修改。
      */
     fun importDefaultBookSources() {
+        // 未激活就不导入 —— 这是「内置源要密码才可用」的落地处：
+        // 源不进数据库，THP 的搜索/目录/正文自然全都拿不到东西。
+        if (!EngineProfile.activated) return
         if (bookSources.isEmpty()) return
         val exists = appDb.bookSourceDao.all.map { it.bookSourceUrl }.toHashSet()
         val add = bookSources.filter { it.bookSourceUrl !in exists }
         if (add.isNotEmpty()) {
             appDb.bookSourceDao.insert(*add.toTypedArray())
         }
+    }
+
+    /**
+     * 激活成功后立即导入出厂源（不必等下次冷启动）。
+     * 返回本次新入库的源数量，供激活页回显。
+     */
+    fun importDefaultBookSourcesOnActivate(): Int {
+        if (!EngineProfile.activated) return 0
+        val before = appDb.bookSourceDao.all.size
+        importDefaultBookSources()
+        return appDb.bookSourceDao.all.size - before
     }
 
 }

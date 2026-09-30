@@ -22,7 +22,7 @@ static def releaseTime() {
 
 def name = "reading-engine"
 // 阅读引擎自有版本线, 与上游 Legado 版本号解耦
-def version = "1.6.0"
+def version = "1.7.0"
 // versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
 // 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
 def versionCodeValue = {
@@ -105,11 +105,9 @@ android {
                 signingConfig = signingConfigs.myConfig
             }
             applicationIdSuffix '.release'
-            if (getApplicationIdSuffix() == '.releaseA') {
-                manifestPlaceholders.put("app_name", "@string/app_name_a")
-            } else {
-                manifestPlaceholders.put("app_name", "@string/app_name")
-            }
+            // ★ app_name 由 productFlavor 决定（见下方 productFlavors）。
+            //   AGP 的 manifestPlaceholders 优先级是 buildType > flavor，
+            //   所以这里**绝不能**再写 app_name，否则五个产物会全叫「阅读引擎」。
 
             minifyEnabled true
             shrinkResources = true
@@ -119,7 +117,6 @@ android {
             if (project.hasProperty("RELEASE_STORE_FILE")) {
                 signingConfig = signingConfigs.myConfig
             }
-            manifestPlaceholders.put("app_name", "@string/app_name")
 
             applicationIdSuffix '.debug'
             versionNameSuffix 'debug'
@@ -129,10 +126,60 @@ android {
     }
     //noinspection GrDeprecatedAPIUsage
     flavorDimensions = ['mode']
+    /**
+     * 五产物：四合一「阅读引擎」 + 小说/漫画/音乐/视频 四个独立 App。
+     *
+     *   包名    com.legado.app[.novel|.comic|.music|.video].release
+     *   源包    app/src/<flavor>/assets/defaultData/bookSources.json（由 tools/build-engine-source-packs.cjs 生成）
+     *
+     * ENGINE_MODULES / ENGINE_SOURCE_TYPES 是**编译期**注入的能力白名单，运行期由
+     * EngineProfile 读取：只声明本模块的 THP caps、只允许本类型的书源参与搜索。
+     */
     productFlavors {
         app {
             dimension "mode"
             manifestPlaceholders.put("APP_CHANNEL_VALUE", "app")
+            manifestPlaceholders.put("app_name", "@string/app_name")
+            buildConfigField "String", "ENGINE_NAME", "\"阅读引擎\""
+            buildConfigField "String", "ENGINE_MODULES", "\"novel,comic,music,video\""
+            // 空 = 不按类型过滤（四合一装全部源）
+            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"\""
+        }
+        novel {
+            dimension "mode"
+            applicationIdSuffix ".novel"
+            manifestPlaceholders.put("APP_CHANNEL_VALUE", "novel")
+            manifestPlaceholders.put("app_name", "小说引擎")
+            buildConfigField "String", "ENGINE_NAME", "\"小说引擎\""
+            buildConfigField "String", "ENGINE_MODULES", "\"novel\""
+            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"0,3\""
+        }
+        comic {
+            dimension "mode"
+            applicationIdSuffix ".comic"
+            manifestPlaceholders.put("APP_CHANNEL_VALUE", "comic")
+            manifestPlaceholders.put("app_name", "漫画引擎")
+            buildConfigField "String", "ENGINE_NAME", "\"漫画引擎\""
+            buildConfigField "String", "ENGINE_MODULES", "\"comic\""
+            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"2\""
+        }
+        music {
+            dimension "mode"
+            applicationIdSuffix ".music"
+            manifestPlaceholders.put("APP_CHANNEL_VALUE", "music")
+            manifestPlaceholders.put("app_name", "音乐引擎")
+            buildConfigField "String", "ENGINE_NAME", "\"音乐引擎\""
+            buildConfigField "String", "ENGINE_MODULES", "\"music\""
+            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"1\""
+        }
+        video {
+            dimension "mode"
+            applicationIdSuffix ".video"
+            manifestPlaceholders.put("APP_CHANNEL_VALUE", "video")
+            manifestPlaceholders.put("app_name", "视频引擎")
+            buildConfigField "String", "ENGINE_NAME", "\"视频引擎\""
+            buildConfigField "String", "ENGINE_MODULES", "\"video\""
+            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"4\""
         }
     }
 

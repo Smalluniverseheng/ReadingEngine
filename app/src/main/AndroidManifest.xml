@@ -626,7 +626,12 @@
     <activity
             android:name="io.legado.app.engine.EngineSetupActivity"
             android:exported="false"
-            android:label="阅读引擎" />
+            android:label="${app_name}" />
+        <activity
+            android:name="io.legado.app.engine.EngineActivationActivity"
+            android:exported="false"
+            android:label="${app_name}"
+            android:launchMode="singleTop" />
         <receiver
             android:name="io.legado.app.engine.BootReceiver"
             android:enabled="true"
