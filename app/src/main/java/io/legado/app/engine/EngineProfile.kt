@@ -2,7 +2,7 @@ package io.legado.app.engine
 
 import android.content.Context
 import io.legado.app.BuildConfig
-import org.json.JSONArray
+import org.json.JSONObject
 import splitties.init.appCtx
 import java.net.HttpURLConnection
 import java.net.URL
@@ -145,8 +145,10 @@ object EngineProfile {
      * 后台地址与**公开**读键。
      *
      * publishable key 本来就是随网页一起下发的公开值（网页端 js/config.js 里就写着它），
-     * 不是秘密：它只允许匿名读 th_kv，改不了任何东西。
-     * 真正的写权限在服务端的 service_role key 上，那个没有进包。
+     * 不是秘密：它只能调公开的 security definer RPC（engine_pwd_fetch），
+     * 既读不到被 RLS 收紧的 th_kv，也改不了任何东西。
+     * （security-fix.sql 2026-08-27 起：th_kv 匿名只读 `vendor:*`、写入仅 service_role。
+     *  所以旧版「直读 th_kv?key=in.(engine_pwd_hash,…)」永远返回 0 行 —— 见 syncCloudPassword。）
      */
     private const val CLOUD_URL = "https://mxvxlgjzeboktufumxbp.supabase.co"
     private const val CLOUD_PUBLISHABLE = "sb_publishable_WzUzAQK5cOEsn7QwFB2cAw_ubIkG7RJ"
@@ -167,31 +169,35 @@ object EngineProfile {
      * @return true = 确实从后台取到了数据（不代表密码一定被改过）
      */
     fun syncCloudPassword(): Boolean {
-        val url = "$CLOUD_URL/rest/v1/th_kv" +
-            "?key=in.(engine_pwd_hash,engine_pwd_ver)&select=key,value"
+        // ★ 必须走 RPC，不能直读 th_kv。
+        //   security-fix.sql(2026-08-27) 把 th_kv 的 RLS 收紧成「匿名只读 vendor:*、
+        //   写入仅 service_role」之后，匿名 `select th_kv?key=in.(engine_pwd_hash,…)`
+        //   会稳定返回 **0 行**（HTTP 200，空数组）—— 直读是一条永远拿不到数据的死路。
+        //   已实测确认：anon 读全表 0 行、anon 写 42501。
+        //   engine_pwd_fetch() 是 security definer，绕过 RLS，只回 hash/版本号、不回明文。
+        //   该 RPC 未部署时 PostgREST 返回 404 → 本函数返回 false，行为与「没网」一致。
+        val url = "$CLOUD_URL/rest/v1/rpc/engine_pwd_fetch"
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
             try {
-                conn.requestMethod = "GET"
+                conn.requestMethod = "POST"
                 conn.connectTimeout = 4000
                 conn.readTimeout = 6000
                 conn.setRequestProperty("apikey", CLOUD_PUBLISHABLE)
                 conn.setRequestProperty("Authorization", "Bearer $CLOUD_PUBLISHABLE")
+                conn.setRequestProperty("Content-Type", "application/json")
                 conn.setRequestProperty("Accept", "application/json")
+                conn.doOutput = true
+                conn.outputStream.use { it.write("{}".toByteArray()) }
                 if (conn.responseCode !in 200..299) {
                     false
                 } else {
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
-                    val arr = JSONArray(body)
-                    var hash = ""
-                    var ver = ""
-                    for (i in 0 until arr.length()) {
-                        val o = arr.optJSONObject(i) ?: continue
-                        when (o.optString("key")) {
-                            "engine_pwd_hash" -> hash = o.optString("value").trim()
-                            "engine_pwd_ver" -> ver = o.optString("value").trim()
-                        }
-                    }
+                    val o = JSONObject(body)
+                    // set=false（后台从未设过 / 已被「恢复出厂默认」清掉）→ 清空缓存，
+                    // 干净地退回 App 里烤死的 123456，而不是留着一份过期指纹把人锁在门外。
+                    val hash = if (o.optBoolean("set", false)) o.optString("hash").trim() else ""
+                    val ver = o.optString("ver").trim()
                     prefs.edit()
                         .putString(KEY_CLOUD_HASH, hash)
                         .putString(KEY_CLOUD_VER, ver)
