@@ -20,7 +20,14 @@ object CheckSource {
     var keyword = "我的"
 
     //校验设置
-    var timeout = CacheManager.getLong("checkSourceTimeout") ?: 180000L
+    // ★单源预算默认从 180s 收到 45s。
+    //   这个 timeout 是**一个源的六个阶段（域名/搜索/发现/详情/目录/正文）共用**的预算，
+    //   而上限决定的是"最坏要跑多久"：出厂源 3000+ 条 ÷ 64 线程 × 180s ≈ 2.9 小时，
+    //   实际会因为重试、慢站拖得更久，最后不是跑完而是被系统回收掉 —— 表现为
+    //   「跑了很久然后自己停了」。45s 对活源足够宽裕（六个请求的正常耗时是秒级），
+    //   却把死站的尾巴砍掉 4 倍，让整轮体检能真正跑完。
+    //   用户在「校验书源」设置里改过值就以用户值为准（CacheManager 里有值就不走默认）。
+    var timeout = CacheManager.getLong("checkSourceTimeout") ?: 45000L
     var wSourceComment = CacheManager.get("wSourceComment")?.toBoolean() ?: true
     var checkDomain = CacheManager.get("checkDomain")?.toBoolean() ?: false
     var checkSearch = CacheManager.get("checkSearch")?.toBoolean() ?: true

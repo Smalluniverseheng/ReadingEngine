@@ -1,0 +1,277 @@
+{
+  "note": "「视频引擎」出厂采集源的黑名单主机。由 _verify_video_sources.mjs / _verify_video_variants.mjs 实测产出，生成器 build-engine-source-packs.cjs 会在生成前剔除这些主机。判死口径：not-json / DNS 或 TLS 失败 / 4xx-5xx。接口正常但关键词无结果的（list-empty）不在此列——那是活源。",
+  "verifiedAt": "2026-09-30T06:00:00.000Z",
+  "total": 45,
+  "hosts": [
+    {
+      "host": "8day.icu",
+      "name": "🎬 46-七天",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "aosikazy.com",
+      "name": "🎬 奥斯卡 | 采集",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "api.apiyhzy.com",
+      "name": "🎬 24-樱花",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "api.niuniuzy.me",
+      "name": "🎬 牛牛点播",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "api.okzyw.net",
+      "name": "🎬 OK资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "api.wsyzy.net",
+      "name": "🎬 🐝┃纯净┃采集",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "api2.niuniuzy.me",
+      "name": "🎬 牛牛资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "by.bfzyapi.com",
+      "name": "🎬 11-暴风",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "caiji.kuaichezy.org",
+      "name": "🎬 快车资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "caiji.semaozy.net",
+      "name": "🎬 【9kg】色猫资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "cj.baozi66.top:66",
+      "name": "🎬 🔵雨哥哥影视",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "cj.rycjapi.com",
+      "name": "🎬 如意资源",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "cj.yayazy.net",
+      "name": "🎬 丫丫点播",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "dadiapi.com",
+      "name": "🎬 成人09",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "dy.7772888.xyz",
+      "name": "🎬 采集丨影视",
+      "reason": "http-522",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "freevideo.zqqds.cn",
+      "name": "河马剧场",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "img.smdyw.top",
+      "name": "🎬 🔵神马资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "jkunzyapi.com",
+      "name": "🎬 💕jkun(直连)",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "m.szyyds.cn",
+      "name": "🎬 有效期27年7月",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "m3u8.apiyhzy.com",
+      "name": "🎬 樱花资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "moduzy3.com",
+      "name": "🎬 💢简影💈魔都",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "niuniuzy3.com",
+      "name": "🎬 36-牛牛",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "playersll.gaoxin155.com.cn",
+      "name": "🎬 搜狐采集",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "sdzyapi.com",
+      "name": "🎬 闪电资源(切)",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "shandianzy.com",
+      "name": "🎬 采集☪闪电",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "simiyy.com",
+      "name": "🎬 🔵私密影院",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "ss.apps.dj",
+      "name": "短剧合集（优+）",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "suoniapi.com",
+      "name": "🎬 影视 • 率率[直连]",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "ty.tyyszy5.com",
+      "name": "🎬 天涯资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "tyyszy.com",
+      "name": "🎬 影视 • 天涯",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "tyyszyapi.com",
+      "name": "🎬 天涯资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "v.ikanbot.com",
+      "name": "爱看影视（优++）",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "vipdytv.com",
+      "name": "🎬 [玖妖]贵宾影院(聚)",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.ah121.com",
+      "name": "🎬 处女",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.gnpt.net",
+      "name": "🎬 54-忆梦",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.hdzyk.com",
+      "name": "优质资源（优）",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.jkunzyapi.com",
+      "name": "🎬 【9kg】jkun资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.qilinzyz.com",
+      "name": "🎬 麒麟资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.xiangjiaozyw.com",
+      "name": "🎬 私人香蕉丨12852部片",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "www.xxibaozyw.com",
+      "name": "🎬 X细胞资源",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "wy.dqyhg.cn",
+      "name": "🎬 千寻时光(聚)",
+      "reason": "dns-or-tls",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "xsd.sdzyapi.com",
+      "name": "🎬 闪电资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "xydm.baicai.buzz",
+      "name": "🎬 [玖妖]小鸟动漫(聚)",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "y.ds05.cn",
+      "name": "🎬 🍀都司资源",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    },
+    {
+      "host": "yayazy2.com",
+      "name": "🎬 63-丫丫",
+      "reason": "not-json",
+      "checkedAt": "2026-09-30T06:00:00.000Z"
+    }
+  ]
+}

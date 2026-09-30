@@ -24,6 +24,9 @@ const ROOT = path.resolve(__dirname, '..')
 const MASTER = path.join(ROOT, 'app/src/main/assets/defaultData/bookSources.json')
 // 视频站点库（272 个已做过 HTTP 验证的 TVBox/苹果CMS 接口）随仓库走，CI 也能复现。
 const VIDEO_SITES = path.join(ROOT, 'tools/data/video_sites.json')
+// 视频站点库里的**已死主机**（实测产出，见文件内 note）。站点库本身保留全量，
+// 这里只做「生成时剔除」，好处是黑名单可审计、可回滚、也随时能重测刷新。
+const VIDEO_DEAD = path.join(ROOT, 'tools/data/video_sites_dead.json')
 // 可选的补充文本源（外部采集产物，不入仓；缺了就跳过）
 const EXTRA_TEXT = 'D:/ai/deep seek/sources/book_sources_verified.json'
 
@@ -109,18 +112,34 @@ function hostOf(u) {
   }
 }
 
+/** 已实测死亡的主机集合。缺文件时退化为空集（一条都不拉黑），不让构建挂掉。 */
+function loadDeadHosts() {
+  const dead = new Set()
+  if (!fs.existsSync(VIDEO_DEAD)) return dead
+  for (const d of (JSON.parse(fs.readFileSync(VIDEO_DEAD, 'utf8')).hosts || [])) {
+    if (d && d.host) dead.add(String(d.host).toLowerCase())
+  }
+  return dead
+}
+
 function genVideoSources() {
   if (!fs.existsSync(VIDEO_SITES)) {
     console.log('! 缺少视频站点库, 跳过生成:', VIDEO_SITES)
     return []
   }
   const sites = JSON.parse(fs.readFileSync(VIDEO_SITES, 'utf8'))
+  const dead = loadDeadHosts()
+  let skippedDead = 0
   const seen = new Set()
   const out = []
   for (const s of sites) {
     const base = normalizeBase(s.url)
     if (!base) continue
     const h = hostOf(base)
+    // ★ 实测死源不进出厂包。理由：出厂包是拿来直接搜的，而搜索有固定时间预算
+    //   （THP 默认 20s）。死源不会只"不产出结果"，它还会占掉一个并发槽直到自己超时，
+    //   于是"源越多 = 结果越少"。剔掉死源等于把预算还给活源。
+    if (dead.has(h)) { skippedDead++; continue }
     if (seen.has(h)) continue
     seen.add(h)
     out.push({
@@ -147,6 +166,7 @@ function genVideoSources() {
       weight: 0,
     })
   }
+  if (dead.size) console.log(`剔除实测死源主机: ${skippedDead} 条 (黑名单共 ${dead.size} 个主机)`)
   return out
 }
 
@@ -171,9 +191,21 @@ function main() {
   const haveHost = new Set(master.map((s) => hostOf(s.bookSourceUrl)))
   const gen = genVideoSources().filter((s) => !haveHost.has(hostOf(s.bookSourceUrl)))
   console.log(`生成视频源: ${gen.length} 条`)
-  const all = master.concat(gen)
 
-  // 3) 全量超集回写 main —— `app`(四合一) flavor 直接吃它, 无需覆盖文件
+  // 3) 剔除死主机 —— 对**全量**生效。
+  //    只靠 genVideoSources 内部的过滤只能做到"不再新增第二次"，删不掉上一轮
+  //    已经落进 main 的那一份（它们现在属于 master，不再算"生成的"）。
+  //    所以在这里对合并后的全量统一清一遍，并把清理结果回写 main，
+  //    这样"剔除"是**幂等且持久**的，而不是每次构建都重新捡回来。
+  const deadHosts = loadDeadHosts()
+  const merged = master.concat(gen)
+  const all = deadHosts.size
+    ? merged.filter((s) => !deadHosts.has(hostOf(s.bookSourceUrl)))
+    : merged
+  const pruned = merged.length - all.length
+  if (pruned) console.log(`从全量剔除死主机源: ${pruned} 条`)
+
+  // 全量超集回写 main —— `app`(四合一) flavor 直接吃它, 无需覆盖文件
   fs.writeFileSync(MASTER, JSON.stringify(all), 'utf8')
   console.log(`回写 main 全量包: ${all.length} 条 (${(fs.statSync(MASTER).size / 1024 / 1024).toFixed(1)}MB)`)
 

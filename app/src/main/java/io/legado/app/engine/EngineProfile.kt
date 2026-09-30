@@ -2,7 +2,10 @@ package io.legado.app.engine
 
 import android.content.Context
 import io.legado.app.BuildConfig
+import org.json.JSONArray
 import splitties.init.appCtx
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
 
 /**
@@ -44,6 +47,10 @@ object EngineProfile {
     private const val PREF = "reading_engine"
     private const val KEY_ACTIVATED = "activated"
     private const val KEY_PWD_HASH = "pwd_hash"
+
+    /** 管理员在后台「引擎中心」设的那份密码指纹（由 [syncCloudPassword] 拉取后缓存）。 */
+    private const val KEY_CLOUD_HASH = "cloud_pwd_hash"
+    private const val KEY_CLOUD_VER = "cloud_pwd_ver"
 
     private val prefs get() = appCtx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
 
@@ -89,14 +96,21 @@ object EngineProfile {
             .joinToString("") { "%02x".format(it) }
 
     /**
-     * 校验密码。未改过密码时同时接受出厂默认与用户设置值
-     * （覆盖安装的老逻辑不会留下 KEY_PWD_HASH，此时只认默认值）。
+     * 校验密码。优先级：本机自定义 > 后台（管理员）设置 > 出厂默认。
+     *
+     * · 本机自定义（KEY_PWD_HASH）：用户在 App 面板里改过 → 以本机为准，
+     *   否则"本机改了密码"会被后台把旧密码又"同步"回来。
+     * · 后台设置（KEY_CLOUD_HASH）：管理员在「引擎中心」设的那份，
+     *   由 [syncCloudPassword] 拉取后缓存。**没联网拉到就跳过这一档**。
+     * · 出厂默认：两档都为空时（覆盖安装的老逻辑不会留下任何 hash）。
      */
     fun verifyPassword(input: String): Boolean {
         if (input.isEmpty()) return false
-        val stored = prefs.getString(KEY_PWD_HASH, null)
-        if (stored.isNullOrEmpty()) return input == DEFAULT_PASSWORD
-        return sha256(SALT + input) == stored
+        val local = prefs.getString(KEY_PWD_HASH, null)
+        if (!local.isNullOrEmpty()) return sha256(SALT + input) == local
+        val cloud = prefs.getString(KEY_CLOUD_HASH, null)
+        if (!cloud.isNullOrEmpty()) return sha256(SALT + input) == cloud
+        return input == DEFAULT_PASSWORD
     }
 
     /** 修改密码。返回 false 表示新密码不合法（长度 4..64）。 */
@@ -118,5 +132,78 @@ object EngineProfile {
 
     /** 供面板展示：当前密码来源。 */
     val passwordSource: String
-        get() = if (hasCustomPassword) "自定义密码" else "出厂默认密码"
+        get() = when {
+            hasCustomPassword -> "本机自定义密码"
+            !prefs.getString(KEY_CLOUD_HASH, null).isNullOrEmpty() ->
+                "管理员后台设置" + cloudPasswordVersion.takeIf { it.isNotEmpty() }?.let { "（第 $it 版）" }.orEmpty()
+            else -> "出厂默认密码"
+        }
+
+    // ────────────────── 后台同步（管理员在「引擎中心」改的密码） ──────────────────
+
+    /**
+     * 后台地址与**公开**读键。
+     *
+     * publishable key 本来就是随网页一起下发的公开值（网页端 js/config.js 里就写着它），
+     * 不是秘密：它只允许匿名读 th_kv，改不了任何东西。
+     * 真正的写权限在服务端的 service_role key 上，那个没有进包。
+     */
+    private const val CLOUD_URL = "https://mxvxlgjzeboktufumxbp.supabase.co"
+    private const val CLOUD_PUBLISHABLE = "sb_publishable_WzUzAQK5cOEsn7QwFB2cAw_ubIkG7RJ"
+
+    /** 后台设置的密码版本号（后台每改一次 +1）。空 = 没设过 / 没同步成功。 */
+    val cloudPasswordVersion: String get() = prefs.getString(KEY_CLOUD_VER, "").orEmpty()
+
+    /**
+     * 从后台拉一次激活密码指纹 —— 让「管理员在后台改密码，各端同步一次即跟随」成真。
+     *
+     * ★ 只读 + best-effort，**绝不 fail-closed**：
+     *  · 断网 / 超时 / 表不存在 / 返回不是 JSON 数组 → 直接返回 false，
+     *    已缓存的指纹与出厂默认都不动。否则用户一断网就被自己的引擎锁在门外。
+     *  · 后台没设过（返回空数组）→ 清掉缓存，干净地退回「出厂默认」。
+     *
+     * 内部是阻塞式 HTTP，**必须在 IO 线程调用**。
+     *
+     * @return true = 确实从后台取到了数据（不代表密码一定被改过）
+     */
+    fun syncCloudPassword(): Boolean {
+        val url = "$CLOUD_URL/rest/v1/th_kv" +
+            "?key=in.(engine_pwd_hash,engine_pwd_ver)&select=key,value"
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            try {
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 4000
+                conn.readTimeout = 6000
+                conn.setRequestProperty("apikey", CLOUD_PUBLISHABLE)
+                conn.setRequestProperty("Authorization", "Bearer $CLOUD_PUBLISHABLE")
+                conn.setRequestProperty("Accept", "application/json")
+                if (conn.responseCode !in 200..299) {
+                    false
+                } else {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val arr = JSONArray(body)
+                    var hash = ""
+                    var ver = ""
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        when (o.optString("key")) {
+                            "engine_pwd_hash" -> hash = o.optString("value").trim()
+                            "engine_pwd_ver" -> ver = o.optString("value").trim()
+                        }
+                    }
+                    prefs.edit()
+                        .putString(KEY_CLOUD_HASH, hash)
+                        .putString(KEY_CLOUD_VER, ver)
+                        .apply()
+                    true
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            // 联网失败一律当作"没同步到"，保留原状。
+            false
+        }
+    }
 }

@@ -80,8 +80,9 @@ class EngineActivationActivity : AppCompatActivity() {
         root.addView(actionButton("稍后再说（退出）") { finishAffinity() })
 
         root.addView(TextView(this).apply {
-            text = "默认密码：${EngineProfile.DEFAULT_PASSWORD}\n" +
-                "激活后可在「引擎面板 → 修改激活密码」里改。\n" +
+            text = "出厂默认密码：${EngineProfile.DEFAULT_PASSWORD}\n" +
+                "（若管理员在后台「引擎中心」改过密码，以管理员设的那份为准，本页联网后自动跟随。）\n" +
+                "激活后可在「引擎面板 → 修改激活密码」里改本机密码。\n" +
                 "忘了密码：卸载重装（已导入的书源会一并清空）。"
             textSize = 12f
             setTextColor(muted())
@@ -90,6 +91,21 @@ class EngineActivationActivity : AppCompatActivity() {
         })
 
         setContentView(ScrollView(this).apply { addView(root) })
+        refreshStatus()
+
+        // 先把管理员在后台「引擎中心」设的密码指纹拉下来，再让用户输 ——
+        // 否则这里校验用的还是本地缓存/出厂默认，「后台改了密码」等于没改。
+        // 断网/超时不会挡人：syncCloudPassword 内部任何失败都只返回 false、保留原状。
+        val activity = this
+        Coroutine.async {
+            runCatching { EngineProfile.syncCloudPassword() }
+            activity.runOnUiThread { activity.refreshStatus() }
+        }
+    }
+
+    /** 刷新「当前状态 / 密码来源」那行。同步完成后要再刷一次，否则来源显示是旧的。 */
+    private fun refreshStatus() {
+        tvMsg.setTextColor(muted())
         tvMsg.text = "当前状态：未激活（密码来源：${EngineProfile.passwordSource}）"
     }
 
