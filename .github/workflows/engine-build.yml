@@ -214,4 +214,5 @@ jobs:
             out/reading-engine-comic-${{ steps.ver.outputs.version }}.apk
             out/reading-engine-music-${{ steps.ver.outputs.version }}.apk
             out/reading-engine-video-${{ steps.ver.outputs.version }}.apk
+            out/SHA256SUMS.txt
           draft: false
