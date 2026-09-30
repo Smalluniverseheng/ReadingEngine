@@ -126,7 +126,10 @@ jobs:
           check() {
             FLAVOR="$1"; PKG="$2"; TYPES="$3"; APK="$4"
             echo "================ $FLAVOR : $APK ================"
-            BADGING=$("$BT/aapt2" dump badging "$APK" 2>/dev/null | head -1)
+            # 全量 badging 与首行分开存：首行(package:)给版本/包名用，
+            # native-code 必须查**全量**输出 —— 见下面第 3 条。
+            BADGING_ALL=$("$BT/aapt2" dump badging "$APK" 2>/dev/null)
+            BADGING=$(echo "$BADGING_ALL" | head -1)
             echo "$BADGING"
 
             echo "$BADGING" | grep -q "versionName='$WANT'" \
@@ -136,7 +139,17 @@ jobs:
               || { echo "::error::$FLAVOR versionCode 不符, 实际 $VCODE 期望 $EXPECT_VCODE"; exit 1; }
             echo "$BADGING" | grep -q "package: name='$PKG'" \
               || { echo "::error::$FLAVOR applicationId 不符, 期望 $PKG"; exit 1; }
-            echo "$BADGING" | grep -q "native-code" || { echo "::error::$FLAVOR 缺 native-code"; exit 1; }
+
+            # 3) 关键组件齐全: 必须带 native 库(ABI 被静默丢弃时这里变红)。
+            #    ★ 必须用 BADGING_ALL: `native-code:` 是 badging 的**最后一行**
+            #      (实测 1.5.5 包在第 79 行, 前面还有若干空行)，而 BADGING 只留了
+            #      head -1 的 package 行 —— 拿 "$BADGING" 去 grep 永远不命中。
+            #      这正是 run #15 的失败原因: 五个 APK 全部构建成功、versionName/
+            #      versionCode/包名全对，却报「缺 native-code」。改为全量输出后
+            #      恢复成 run #12（单产物时期）那份能正常工作的写法。
+            echo "$BADGING_ALL" | grep -q "native-code" \
+              || { echo "::error::$FLAVOR 缺 native-code（ABI 可能被静默丢弃）"; exit 1; }
+            echo "  ABI: $(echo "$BADGING_ALL" | grep 'native-code' | head -1)"
 
             "$BT/apksigner" verify --print-certs "$APK" | tee /tmp/certs_$FLAVOR.txt
             grep -q "CN=Reading Engine" /tmp/certs_$FLAVOR.txt \
