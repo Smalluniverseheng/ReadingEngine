@@ -49,8 +49,11 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
 
     private fun initSearchPool() {
         searchPool?.close()
+        // ★ 全源搜索用**专属**并发上限 `MAX_SEARCH_THREAD`(64)，不再是 MAX_THREAD(9)。
+        //   旧写法把 3600+ 条源的全源搜索钉死在 9 条并发：10 秒预算下只跑完全部源的约 1%，
+        //   用户看到的就是「几秒钟就搜完、只有几本书」。详见 AppConst.MAX_SEARCH_THREAD 注释。
         searchPool = Executors
-            .newFixedThreadPool(min(threadCount, AppConst.MAX_THREAD)).asCoroutineDispatcher()
+            .newFixedThreadPool(min(threadCount, AppConst.MAX_SEARCH_THREAD)).asCoroutineDispatcher()
     }
 
     fun search(searchId: Long, key: String) {

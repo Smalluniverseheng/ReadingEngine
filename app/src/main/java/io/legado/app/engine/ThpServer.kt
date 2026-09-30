@@ -68,8 +68,19 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
          * 依据 THP §4：单端点响应建议 ≤15s，而资源库聚合搜索给单 peer 的超时是 **8s**。
          * 引擎旧默认预算是 25s —— 超过调用方超时，等于引擎的规范搜索**永远被判定失败**。
          * 这里压到 7s，留 1s 网络余量，保证结果能在调用方超时前返回（聚合搜索允许部分结果）。
+         *
+         * ★2026-09-30 调整：7s → 20s，并允许调用方用 `budget` 覆盖。
+         * 7s 是「迁就 8s 调用方」的产物，但代价是**只扫得完全部源的 1%**：
+         * 全源搜索的耗时几乎正比于预算，7s 的截断让规范端点的结果永远是杯水车薪，
+         * 前端表现为「几秒钟搜一下就没了、只给几本书」。
+         * 现在默认放宽到 20s；调用方仍可在请求里带 `budget` 显式覆盖
+         * （老调用方 8s 超时的场景会自然超时并被跳过 —— 与旧行为一致，不会更差）。
          */
-        private const val SPEC_SEARCH_TIMEOUT_SEC = 7L
+        private const val SPEC_SEARCH_TIMEOUT_SEC = 20L
+
+        /** 规范端点 `budget` 允许范围(秒)，与兼容端点对齐。 */
+        private const val SPEC_SEARCH_BUDGET_MIN_SEC = 5L
+        private const val SPEC_SEARCH_BUDGET_MAX_SEC = 120L
 
         /** discover/explore 遍历全部源的总预算(ms)，防止"源多时单个请求跑几分钟" */
         private const val DISCOVER_BUDGET_MS = 12_000L
@@ -81,7 +92,12 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
          */
         private const val SEARCH_BUDGET_DEFAULT_SEC = 25L
         private const val SEARCH_BUDGET_MIN_SEC = 5L
-        private const val SEARCH_BUDGET_MAX_SEC = 60L
+        /**
+         * 兼容端点 budget 上限。★60s → 120s（2026-09-30）。
+         * 库里 3600+ 条启用源，60 秒也未必扫得完；把上限抬到 120s，
+         * 让「深度搜索/搜全」这种明确要慢的场景有足够空间（前端仍可只取首屏小预算）。
+         */
+        private const val SEARCH_BUDGET_MAX_SEC = 120L
 
         /**
          * 搜索结果短期缓存。★这是「加载更多/瀑布流」成立的前提：
@@ -246,9 +262,14 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         if (q.isNullOrEmpty()) return json(400, errSpec("INVALID_REQUEST", "缺参数 q"))
         // §8: limit 默认 20、最大 100，超限自动截断不报错（旧实现默认 50 且无上限）
         val limit = (get("limit")?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
-        // ★ 时间预算必须小于调用方超时(§4: 资源库聚合给单 peer 8s)，否则「永远超时」
+        // ★ 时间预算必须小于调用方超时(§4)，否则「永远超时」。
+        //   默认 20s；调用方可用 `budget` 显式覆盖（5–120s）。
+        //   注意：`limit` 是**返回条数**上限，`budget` 是**扫描时长**上限 —— 两者独立。
+        //   旧实现只给 7s，于是无论 limit 填多大，扫描都只跑完全部源的约 1%。
+        val budget = (get("budget")?.toLongOrNull() ?: SPEC_SEARCH_TIMEOUT_SEC)
+            .coerceIn(SPEC_SEARCH_BUDGET_MIN_SEC, SPEC_SEARCH_BUDGET_MAX_SEC)
         val rd = EngineSearchController.search(
-            mapOf("key" to listOf(q)), timeoutSec = SPEC_SEARCH_TIMEOUT_SEC)
+            mapOf("key" to listOf(q)), timeoutSec = budget)
         if (!rd.isSuccess) return json(502, errSpec("UPSTREAM_FAIL", rd.errorMsg ?: "搜索失败"))
         @Suppress("UNCHECKED_CAST")
         val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
@@ -276,7 +297,16 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             n++
         }
         // §8 分页三件套: 引擎一轮返回全量, 故 cursor="" + hasMore=false
-        return json(200, okSpec(arr, pageMeta(n)))
+        // ★2026-09-30 追加**附加键**（对老调用方无影响，规范允许 meta 带扩展字段）：
+        //   truncated / scannedSources / totalSources / budgetSec —— 让调用方能区分
+        //   「全网就这么多」和「只扫了一部分就被预算截断」，从而提示用户「继续搜索」或加大预算。
+        //   这正是过去「搜索几秒钟就没了、只给几本书」无从解释的原因：调用方看不到截断信号。
+        val meta = pageMeta(n)
+            .put("budgetSec", budget)
+            .put("truncated", EngineSearchController.lastTruncated)
+            .put("scannedSources", EngineSearchController.lastScannedSources)
+            .put("totalSources", EngineSearchController.lastTotalSources)
+        return json(200, okSpec(arr, meta))
     }
 
     private fun specToc(module: String, get: (String) -> String?): Response {

@@ -387,7 +387,10 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var threadCount: Int
-        get() = appCtx.getPrefInt(PreferKey.threadCount, 32)
+        // ★ 默认值 32 → 64（2026-09-30）。全源搜索 3600+ 条源，旧默认 32 与搜索专属上限
+        //   一起把并发压到极低；现在搜索侧上限是 AppConst.MAX_SEARCH_THREAD(64)，
+        //   默认线程数同步抬到 64 才能真正吃满。其他后台任务仍各自 `min(n, MAX_THREAD=9)` 不变。
+        get() = appCtx.getPrefInt(PreferKey.threadCount, 64)
         set(value) {
             appCtx.putPrefInt(PreferKey.threadCount, value)
         }

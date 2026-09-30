@@ -15,7 +15,10 @@ import kotlinx.coroutines.launch
 import splitties.init.appCtx
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
+import java.util.Collections
 import java.util.UUID
 
 /**
@@ -121,19 +124,57 @@ object EngineBeacon {
         }
     }
 
+    /**
+     * ★2026-09-19 修复「前端发现引擎时好时坏 / 锁屏后引擎就消失」的**根因之一**。
+     *
+     * 旧实现只往 `255.255.255.255`（**有限广播**）发一份，这在下面三种常见环境下必坏：
+     *  1) 手机同时开着**移动数据 / VPN**（代理类 App 极常见）时，有限广播由内核按
+     *     **默认路由**挑出口 —— 可能从蜂窝或 tun 隧道出去，**局域网内一台都收不到**；
+     *  2) 大量 AP / 路由器**直接丢弃有限广播**，但放行**子网定向广播**；
+     *  3) 多网卡（WiFi + 有线 + 热点）时只会走其中一个网卡。
+     *
+     * 子网定向广播（如 192.168.1.255）的目的地址**落在该网卡自己的子网内**，
+     * 内核必然从**那块网卡**发出 → 出口正确，且 AP 普遍放行。
+     */
+    private fun directedBroadcasts(): List<InetAddress> {
+        val out = ArrayList<InetAddress>()
+        runCatching {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching
+            for (ni in Collections.list(ifaces)) {
+                if (!ni.isUp) continue
+                for (ia in ni.interfaceAddresses) {
+                    // IPv6 没有广播地址，interfaceAddresses 里 broadcast 为 null
+                    val b = ia.broadcast ?: continue
+                    if (b is Inet4Address && !b.isAnyLocalAddress) out.add(b)
+                }
+            }
+        }
+        return out
+    }
+
+    /** 把报文发给「每个网卡的子网定向广播」+ 有限广播兜底 */
+    private fun sendToAll(sock: DatagramSocket, payload: ByteArray) {
+        val targets = directedBroadcasts()
+        for (a in targets) {
+            runCatching { sock.send(DatagramPacket(payload, payload.size, a, BEACON_PORT)) }
+        }
+        // 兜底：老环境 / 单网卡 / 定向广播拿不到时，有限广播仍可能生效
+        runCatching {
+            sock.send(DatagramPacket(payload, payload.size,
+                InetAddress.getByName("255.255.255.255"), BEACON_PORT))
+        }
+    }
+
     private fun sendHello(sock: DatagramSocket) {
         val payload = "THP/1 HELLO ${ThpServer.PORT} ${instanceId()} engine $CAPS $NAME".toByteArray()
-        val addr = InetAddress.getByName("255.255.255.255")
-        sock.send(DatagramPacket(payload, payload.size, addr, BEACON_PORT))
+        sendToAll(sock, payload)
     }
 
     private fun sendPacket(text: String) {
         runCatching {
-            val payload = text.toByteArray()
-            val addr = InetAddress.getByName("255.255.255.255")
             DatagramSocket().use { s ->
                 s.broadcast = true
-                s.send(DatagramPacket(payload, payload.size, addr, BEACON_PORT))
+                sendToAll(s, text.toByteArray())
             }
         }
     }

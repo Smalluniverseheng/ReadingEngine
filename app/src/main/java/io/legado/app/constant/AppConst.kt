@@ -28,6 +28,25 @@ object AppConst {
 
     const val MAX_THREAD = 9
 
+    /**
+     * ★搜索引擎专用并发上限（2026-09-30 新增）。
+     *
+     * 起因：库里有 3600+ 条启用源，而全源搜索此前被 `min(threadCount, MAX_THREAD)` 死死
+     * 钉在 **9** 条并发 —— 设置里把线程数填成 32 / 128 都没用（`MAX_THREAD = 9` 是硬顶）。
+     * 于是「预算 10 秒 × 9 线程」实际只扫完全部源的 **1% 左右**，表现就是
+     * 「几秒钟搜一下、给几本书就没了」，而且加大预算也没明显改善。
+     *
+     * 为什么单开一个常量、而不是直接把 MAX_THREAD 抬高：
+     * `MAX_THREAD` 还被导出书籍(ExportBookService) / 缓存书籍(CacheBookService) /
+     * 检测书源(CheckSourceService) 复用，那些是**长时间后台任务**，抬到 64 会同时
+     * 压满内存与磁盘 IO。搜索引擎是**短时突发**，理应单独放宽。
+     *
+     * 64 的取值依据：源站绝大多数是不同域名，OkHttp 的 Dispatcher 默认
+     * maxRequests=64 / maxRequestsPerHost=5 —— 64 正好吃满 OkHttp 允许的全局并发，
+     * 对同一域名的请求仍会被 OkHttp 自己限到 5 条，不会把单个站打爆。
+     */
+    const val MAX_SEARCH_THREAD = 64
+
     const val DEFAULT_WEBDAV_ID = -1L
 
     private const val OFFICIAL_SIGNATURE =
