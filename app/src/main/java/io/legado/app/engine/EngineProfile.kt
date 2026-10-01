@@ -84,8 +84,26 @@ object EngineProfile {
 
     // ────────────────── 首次激活门 ──────────────────
 
+    /**
+     * ★ 激活门总开关 —— 2026-10-01 由用户指定：自用阶段不设密码，装完即用。
+     *
+     * 为什么是「旁路」而不是「删除」：
+     *   用户原话是「先不用密码，但框架先买好；以后想加密码的时候还能加」。
+     *   所以校验 / 改密 / 后台同步 / 激活页这一整套一行未删，
+     *   只用这一个常量把入口整体旁路。日后要恢复门禁，把它改成 true 即回到旧行为，
+     *   不需要重新实现任何东西。
+     *
+     * 关闭后的行为（=「开箱即用」）：
+     *   · 内置源冷启动直接入库（App.onCreate → importDefaultBookSourcesOnActivate）
+     *   · 欢迎页不再跳激活页，直接进主界面
+     *   · THP 端点不再返回 403 activation_required，meta 的 activationRequired 恒为 false
+     *   · UDP 照常广播 caps，前端发现即可用
+     */
+    const val PASSWORD_GATE_ENABLED = false
+
     /** 是否已激活（未激活时内置源不可用、不声明白名单外的能力）。 */
-    val activated: Boolean get() = prefs.getBoolean(KEY_ACTIVATED, false)
+    val activated: Boolean
+        get() = !PASSWORD_GATE_ENABLED || prefs.getBoolean(KEY_ACTIVATED, false)
 
     /** 用户改过密码（未改过则用出厂默认）。 */
     private val hasCustomPassword: Boolean get() = !prefs.getString(KEY_PWD_HASH, null).isNullOrEmpty()

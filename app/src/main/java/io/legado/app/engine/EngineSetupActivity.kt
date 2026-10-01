@@ -73,23 +73,35 @@ class EngineSetupActivity : AppCompatActivity() {
             toast("引擎服务已重新拉起")
         })
 
-        root.addView(sectionTitle("内置源激活"))
+        // ★ 激活段落随门禁开关显隐：自用形态（PASSWORD_GATE_ENABLED=false）下不显示，
+        //   免得用户看到「激活」二字以为还要输密码 —— 框架仍在，改回 true 即恢复。
+        if (EngineProfile.PASSWORD_GATE_ENABLED) {
+            root.addView(sectionTitle("内置源激活"))
 
-        root.addView(actionButton("激活 / 重新解锁内置源") {
-            startActivity(EngineActivationActivity.intentFor(this))
-        })
+            root.addView(actionButton("激活 / 重新解锁内置源") {
+                startActivity(EngineActivationActivity.intentFor(this))
+            })
 
-        root.addView(actionButton("修改激活密码") { showChangePasswordDialog() })
+            root.addView(actionButton("修改激活密码") { showChangePasswordDialog() })
 
-        root.addView(hintText(
-            "· 未激活时内置源不会入库, 局域网内的阅读前端也搜不到任何内容。\n" +
-                "· 出厂默认密码 ${EngineProfile.DEFAULT_PASSWORD}；修改后请自行记牢, " +
-                "忘密码只能卸载重装。\n" +
-                "· 已激活的机器可以直接在下面的书源管理里增删源; " +
-                "本产物只认本类型的源(" +
-                EngineProfile.sourceTypes.sorted().joinToString("/") { typeName(it) } +
-                "), 其他类型会被过滤掉。"
-        ))
+            root.addView(hintText(
+                "· 未激活时内置源不会入库, 局域网内的阅读前端也搜不到任何内容。\n" +
+                    "· 出厂默认密码 ${EngineProfile.DEFAULT_PASSWORD}；修改后请自行记牢, " +
+                    "忘密码只能卸载重装。\n" +
+                    "· 已激活的机器可以直接在下面的书源管理里增删源; " +
+                    "本产物只认本类型的源(" +
+                    EngineProfile.sourceTypes.sorted().joinToString("/") { typeName(it) } +
+                    "), 其他类型会被过滤掉。"
+            ))
+        } else {
+            root.addView(sectionTitle("内置源"))
+            root.addView(hintText(
+                "· 本引擎为自用版：出厂源已随安装包内置，**装完即用，无需任何密码**。\n" +
+                    "· 可直接在「书源管理」里增删源；本产物只认本类型的源(" +
+                    EngineProfile.sourceTypes.sorted().joinToString("/") { typeName(it) } +
+                    ")，其他类型会被过滤掉。"
+            ))
+        }
 
         root.addView(sectionTitle("使用说明"))
         root.addView(hintText(
@@ -126,7 +138,15 @@ class EngineSetupActivity : AppCompatActivity() {
             appendLine("引擎服务:  ${if (WebService.isRun) "运行中" else "启动中…"}")
             appendLine("产物:  ${EngineProfile.displayName}${if (EngineProfile.isAllInOne) "（四合一）" else ""}")
             appendLine("支持模块:  ${EngineProfile.modules.joinToString(" / ") { moduleName(it) }}")
-            appendLine("激活状态:  ${if (EngineProfile.activated) "已激活" else "未激活 · 内置源不可用"}（${EngineProfile.passwordSource}）")
+            appendLine(
+                "源状态:  " + if (!EngineProfile.PASSWORD_GATE_ENABLED) {
+                    "出厂源已内置 · 开箱即用（自用版，无密码）"
+                } else if (EngineProfile.activated) {
+                    "已激活（${EngineProfile.passwordSource}）"
+                } else {
+                    "未激活 · 内置源不可用"
+                }
+            )
             appendLine("可用书源:  ${if (cachedSourceCount < 0) "统计中…" else "$cachedSourceCount 条"}")
             appendLine("局域网地址:  ${EngineBeacon.lanUrl().ifEmpty { "获取中…" }}")
             appendLine("发现广播:  UDP ${EngineBeacon.BEACON_PORT}   THP/1 HELLO   caps=${EngineBeacon.CAPS.ifEmpty { "(未激活, 不广播能力)" }}")

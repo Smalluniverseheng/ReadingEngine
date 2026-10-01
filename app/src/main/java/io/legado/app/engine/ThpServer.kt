@@ -59,9 +59,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
         const val PROTOCOL = "THP/1.0"
 
-        /** §8: limit 默认 20、最大 100（超限截断不报错） */
+        /** §8: limit 默认 20。★100 → 500（2026-10-01）：见 SEARCH_BUDGET_MAX_SEC 的「搜全」说明。 */
         private const val DEFAULT_LIMIT = 20
-        private const val MAX_LIMIT = 100
+        private const val MAX_LIMIT = 500
 
         /**
          * 规范端点搜索的时间预算(秒)。
@@ -78,9 +78,13 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
          */
         private const val SPEC_SEARCH_TIMEOUT_SEC = 20L
 
-        /** 规范端点 `budget` 允许范围(秒)，与兼容端点对齐。 */
+        /**
+         * 规范端点 `budget` 允许范围(秒)。
+         * ★上限与兼容端点 SEARCH_BUDGET_MAX_SEC **保持一致**（值相同，不互相引用 ——
+         *   Kotlin 的 const val 不宜跨声明次序互相引用，写死同值 + 注释锁死关系）。
+         */
         private const val SPEC_SEARCH_BUDGET_MIN_SEC = 5L
-        private const val SPEC_SEARCH_BUDGET_MAX_SEC = 120L
+        private const val SPEC_SEARCH_BUDGET_MAX_SEC = 1800L
 
         /** discover/explore 遍历全部源的总预算(ms)，防止"源多时单个请求跑几分钟" */
         private const val DISCOVER_BUDGET_MS = 12_000L
@@ -93,11 +97,22 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         private const val SEARCH_BUDGET_DEFAULT_SEC = 25L
         private const val SEARCH_BUDGET_MIN_SEC = 5L
         /**
-         * 兼容端点 budget 上限。★60s → 120s（2026-09-30）。
-         * 库里 3600+ 条启用源，60 秒也未必扫得完；把上限抬到 120s，
-         * 让「深度搜索/搜全」这种明确要慢的场景有足够空间（前端仍可只取首屏小预算）。
+         * 兼容端点 budget 上限。★60s → 120s（2026-09-30）→ **1800s（2026-10-01）**。
+         *
+         * 为什么再次大幅抬高（这次是用户明确诉求）：
+         *   用户反馈「小说搜索到几千条就自动截止，要能一直搜到全部（上万条）」。
+         *   根因不是返回条数上限，而是**扫描时长上限**：库里 3600+ 条启用源，
+         *   一次全源扫描耗时正比于源数，120s 只够扫完一部分 → truncated=true，
+         *   调用方看到的就是「到量就停」。
+         *   把上限抬到 1800s（30 分钟），并配 `full=1` 显式要「搜全」，
+         *   让「一直搜到全部结果」在协议层面真正可行；普通首屏仍用小 budget，不受影响。
+         *   （配合 search() 的**累积合并**：每次更深一轮的结果并入缓存而不是替换，
+         *    所以中途被截断也不丢已搜到的条目。）
          */
-        private const val SEARCH_BUDGET_MAX_SEC = 120L
+        private const val SEARCH_BUDGET_MAX_SEC = 1800L
+
+        /** `full=1` 时使用的预算：直接顶到上限，语义是「不设时间上限，扫完为止」。 */
+        private const val SEARCH_BUDGET_FULL_SEC = SEARCH_BUDGET_MAX_SEC
 
         /**
          * 搜索结果短期缓存。★这是「加载更多/瀑布流」成立的前提：
@@ -115,8 +130,9 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         )
 
         private val SEARCH_CACHE = ConcurrentHashMap<String, SearchCache>()
-        private const val SEARCH_CACHE_TTL_MS = 10 * 60 * 1000L
-        private const val SEARCH_CACHE_MAX = 8
+        /** ★10 分钟 → 60 分钟（2026-10-01）：搜全可能耗十几分钟，翻页不能半路失效。 */
+        private const val SEARCH_CACHE_TTL_MS = 60 * 60 * 1000L
+        private const val SEARCH_CACHE_MAX = 16
 
         /** 请求体上限。自己读原始字节就绕过了 NanoHTTPD 的体积保护，故在此补一道。 */
         private const val MAX_BODY_BYTES = 1 * 1024 * 1024
@@ -299,13 +315,15 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
     private fun specSearch(module: String, get: (String) -> String?): Response {
         val q = (get("q") ?: get("key"))?.trim()
         if (q.isNullOrEmpty()) return json(400, errSpec("INVALID_REQUEST", "缺参数 q"))
-        // §8: limit 默认 20、最大 100，超限自动截断不报错（旧实现默认 50 且无上限）
+        // §8: limit 默认 20、最大 500，超限自动截断不报错（旧实现默认 50 且无上限）
         val limit = (get("limit")?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
         // ★ 时间预算必须小于调用方超时(§4)，否则「永远超时」。
-        //   默认 20s；调用方可用 `budget` 显式覆盖（5–120s）。
+        //   默认 20s；调用方可用 `budget` 显式覆盖（5–1800s），或 `full=1` 直接顶到上限（搜全）。
         //   注意：`limit` 是**返回条数**上限，`budget` 是**扫描时长**上限 —— 两者独立。
         //   旧实现只给 7s，于是无论 limit 填多大，扫描都只跑完全部源的约 1%。
-        val budget = (get("budget")?.toLongOrNull() ?: SPEC_SEARCH_TIMEOUT_SEC)
+        val full = get("full") == "1" || get("full") == "true"
+        val budget = (if (full) SPEC_SEARCH_BUDGET_MAX_SEC
+        else get("budget")?.toLongOrNull() ?: SPEC_SEARCH_TIMEOUT_SEC)
             .coerceIn(SPEC_SEARCH_BUDGET_MIN_SEC, SPEC_SEARCH_BUDGET_MAX_SEC)
         val rd = EngineSearchController.search(
             mapOf("key" to listOf(q)), timeoutSec = budget)
@@ -463,7 +481,11 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val wantType = if (all) -1 else (MODULES[type] ?: 0)
         val page = (parms["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
         val limit = (parms["limit"]?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
-        val budgetSec = (parms["budget"]?.toLongOrNull() ?: SEARCH_BUDGET_DEFAULT_SEC)
+        // ★ full=1：调用方明确要「搜全」——直接顶到预算上限，忽略 budget。
+        //   语义是「不设时间上限，扫完为止」，配合下面的累积合并，可分多次一路搜到底。
+        val wantFull = parms["full"] == "1" || parms["full"] == "true"
+        val budgetSec = (if (wantFull) SEARCH_BUDGET_FULL_SEC
+        else parms["budget"]?.toLongOrNull() ?: SEARCH_BUDGET_DEFAULT_SEC)
             .coerceIn(SEARCH_BUDGET_MIN_SEC, SEARCH_BUDGET_MAX_SEC)
 
         val cacheKey = "$type|$q"
@@ -472,19 +494,23 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
         // 何时必须重扫：
         //  ① 第一页永远重扫（用户要的是"再搜一次"的新结果，不能喂旧缓存）
-        //  ② 无缓存（翻页时缓存过期 → 直接告诉调用方重搜，别在这儿白等 25s）
+        //  ② 无缓存（翻页时缓存过期 → 直接告诉调用方重搜，别在这儿白等）
         //  ③ 缓存是被截断的，且这次预算更大 → 值得为"加载更多"再扫一轮更深的
         val deeper = cache != null && cache.truncated && budgetSec > cache.budgetSec
         val needSweep = page == 1 || cache == null || deeper
 
         if (page > 1 && cache == null) {
-            return json(409, err("no_cache", "上次搜索结果已过期（缓存 10 分钟），请重新搜索"))
+            return json(409, err("no_cache", "上次搜索结果已过期（缓存 60 分钟），请重新搜索"))
         }
 
         if (needSweep) {
             val swept = sweepSearch(q, wantType, budgetSec) ?: return json(502, err("source_error", "搜索失败"))
-            cache = swept
-            SEARCH_CACHE[cacheKey] = swept
+            // ★ 累积合并（2026-10-01）：仅在「更深一轮」时合并，且只在上一轮被截断时。
+            //   旧行为是直接替换 —— 若新一轮在别的源上被截断，用户点"加载更多"反而**变少**。
+            //   现在已搜到的条目一律保留，只会越搜越多，直到 truncated=false（真的扫完了）。
+            val next = if (deeper) mergeCache(cache, swept) else swept
+            cache = next
+            SEARCH_CACHE[cacheKey] = next
             // 简单清理：超量时丢掉最旧的一半，避免长驻进程里无限增长
             if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
                 SEARCH_CACHE.entries
@@ -564,6 +590,42 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             truncated = truncated,
             scannedSources = EngineSearchController.lastScannedSources,
             totalSources = EngineSearchController.lastTotalSources,
+        )
+    }
+
+    /**
+     * 把「更深一轮」的扫描结果并入上一轮缓存。
+     *
+     * 为什么需要它（过去真实症状）：全源扫描受时间预算截断时，不同的预算会在**不同的源上**停下。
+     * 旧实现是整份替换缓存 —— 于是用户点「加载更多（更大的 budget 重扫）」时，
+     * 新一轮如果恰好少扫到几个源，列表反而比上一轮**更短**，用户看到的就是「越加载越少」。
+     *
+     * 合并规则：
+     *   · 新一轮在前（它是更深的扫描，质量更高），旧一轮补在后面，按 id 去重；
+     *   · truncated / totalSources 以**新一轮**为准（它是更新的观测）；
+     *   · scannedSources 取两者较大值（真实"已扫过的源数"只会增加）。
+     * ⚠ 仅当旧缓存 truncated=true 时才合并 —— 旧缓存若是完整结果，新一轮只会是同一集合，
+     *   直接替换即可，没有合并的必要（也不该把两轮的排序差异暴露给用户）。
+     */
+    private fun mergeCache(old: SearchCache?, fresh: SearchCache): SearchCache {
+        if (old == null || !old.truncated) return fresh
+        val merged = JSONArray()
+        val seen = HashSet<String>()
+        for (i in 0 until fresh.items.length()) {
+            val o = fresh.items.optJSONObject(i) ?: continue
+            if (seen.add(o.optString("id"))) merged.put(o)
+        }
+        for (i in 0 until old.items.length()) {
+            val o = old.items.optJSONObject(i) ?: continue
+            if (seen.add(o.optString("id"))) merged.put(o)
+        }
+        return SearchCache(
+            items = merged,
+            createdAt = System.currentTimeMillis(),
+            budgetSec = maxOf(fresh.budgetSec, old.budgetSec),
+            truncated = fresh.truncated,
+            scannedSources = maxOf(fresh.scannedSources, old.scannedSources),
+            totalSources = fresh.totalSources,
         )
     }
 

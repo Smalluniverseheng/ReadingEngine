@@ -109,6 +109,11 @@ class App : Application() {
                 .enableLogger(BuildConfig.DEBUG || AppConfig.recordLog)
                 .setLogger(EventLogger())
             DefaultData.upVersion()
+            // ★ 免密码形态（EngineProfile.PASSWORD_GATE_ENABLED = false）：出厂源开箱入库。
+            //   改门禁之前，这一步挂在「激活页输对密码」之后；现在没有激活页了，
+            //   若不在冷启动补一次，「装完即用」就会变成「装完空空如也、搜什么都为空」。
+            //   幂等：importDefaultBookSourcesOnActivate 只补库里没有的源，每次冷启动调用都安全。
+            runCatching { DefaultData.importDefaultBookSourcesOnActivate() }
             AppFreezeMonitor.init(this@App)
             DispatchersMonitor.init()
             URL.setURLStreamHandlerFactory(ObsoleteUrlFactory(okHttpClient))

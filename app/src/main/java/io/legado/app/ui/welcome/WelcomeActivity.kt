@@ -139,15 +139,18 @@ open class WelcomeActivity : BaseActivity<ActivityWelcomeBinding>() {
     /**
      * 唯一的「离开欢迎页」出口。
      *
-     * 未激活 → 先走激活页：出厂源要密码才入库，直接放行等于绕过了整个门。
-     * 已激活 → 老行为不变，直接进主界面。
+     * 门禁开启时（PASSWORD_GATE_ENABLED=true）：
+     *   未激活 → 先走激活页：出厂源要密码才入库，直接放行等于绕过了整个门。
+     *   已激活 → 老行为不变，直接进主界面。
+     * 门禁关闭时（当前自用形态）：
+     *   不再有「未激活」这个状态，直接进主界面；出厂源由 App.onCreate 统一补入。
      */
     private fun goNext() {
-        if (EngineProfile.activated) {
-            startMainActivity()
-        } else {
+        if (EngineProfile.PASSWORD_GATE_ENABLED && !EngineProfile.activated) {
             startActivity<EngineActivationActivity>()
             finish()
+        } else {
+            startMainActivity()
         }
     }
 
