@@ -9,9 +9,11 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.savePreservingCustomCoverUrl
+import io.legado.app.help.config.AppConfig
 import io.legado.app.help.source.exploreKinds
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.ui.book.search.SearchScope
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -115,21 +117,91 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         private const val SEARCH_BUDGET_FULL_SEC = SEARCH_BUDGET_MAX_SEC
 
         /**
-         * 搜索结果短期缓存。★这是「加载更多/瀑布流」成立的前提：
+         * 搜索结果短期缓存 + **深搜状态机**。★这是「加载更多/瀑布流」成立的前提：
          * 一次全源扫描要 20s+，翻页时**绝不能重扫**，否则每次翻页都要再等 20s。
-         * 键 = "<type>|<q>"，值为该次扫描的**去重后完整列表**，翻页只是切片。
-         * truncated 为真表示该次扫描被预算截断 —— 此时允许调用方用更大的 budget 重扫覆盖缓存。
+         * 键 = "<type>|<q>"，值为该次搜索**去重后的累积列表**，翻页只是切片。
+         *
+         * ★「不断续搜」（2026-10-02）：旧版只做一次时间预算内的全源扫描（第 1 页），
+         * 结果封在缓存里，翻页只是切片 —— 于是「几万本」的能力被一次预算掐死在
+         * 几百/几千条。现在缓存里带着深搜进度（sourcePage/sweepOffset），每次翻到
+         * 尾部就按 chunk 补扫一块新源；当前页全部源过完且仍有命中就翻源内下一页，
+         * 直到某页全空（exhausted=true）才说「没有更多」。条目只增不减、旧前新后，
+         * 翻页序永远稳定（前端 _ids 去重兜底）。
          */
-        private data class SearchCache(
-            val items: JSONArray,
-            val createdAt: Long,
-            val budgetSec: Long,
-            val truncated: Boolean,
-            val scannedSources: Int,
-            val totalSources: Int,
-        )
+        private class SearchCache(val budgetSec: Long) {
+            /** 累积结果（旧前新后追加，翻页序稳定）。 */
+            val items = JSONArray()
+
+            /** 全局去重集合（跨 chunk / 跨源内页），与 items 一一对应。 */
+            val seenIds = HashSet<String>()
+
+            @Volatile
+            var createdAt = System.currentTimeMillis()
+
+            /** 当前深挖到的源内页码（1 = 各源的第 1 页搜索结果）。 */
+            @Volatile
+            var sourcePage = 1
+
+            /** 当前源内页已扫过的源数 —— 下一 chunk 的起点（断点续扫，不回头重扫）。 */
+            @Volatile
+            var sweepOffset = 0
+
+            /** 当前源内页是否出现过命中 —— 整页过完后据此决定翻不翻下一页。 */
+            @Volatile
+            var pageHits = false
+
+            /** 所有源的所有页都已见底，不会再有新增。 */
+            @Volatile
+            var exhausted = false
+
+            /** 累计已扫过的源次（跨 chunk/跨页累计，只增不减，仅用于进度展示）。 */
+            @Volatile
+            var sweptSources = 0
+
+            /** 参与搜索的源总数（最近一次观测，仅用于进度展示）。 */
+            @Volatile
+            var totalSources = 0
+
+            /**
+             * 当前 chunk 已经历的「零推进」次数。★**跨请求持久化**，这是本类的关键修正。
+             *
+             * 旧实现把 zeroRounds 放在 deepSweep 的局部变量里，并期望「连续两轮零推进就跳过
+             * 整块」。但单块会被分配**剩余全部预算**（最多 25s），而一块死源（连得上却不响应）
+             * 正好能把预算吃光 —— 下一轮循环开头 `now >= deadline` 先 break，
+             * **局部 zeroRounds 永远停在 1，保险丝永远不触发**。
+             * 于是 sweepOffset 被钉死在同一块上：每个请求都重扫同样 128 个死源、
+             * 返回 0 条新结果，total 再不增长。前端拿着 hasMore=true 反复重试同一页，
+             * 直到自己的空页保险丝熔断 —— 用户看到的就是「搜来搜去只有几本」。
+             */
+            @Volatile
+            var chunkAttempts = 0
+
+            /** [chunkAttempts] 所针对的 chunk 起点；换块即归零。 */
+            @Volatile
+            var chunkStart = -1
+        }
 
         private val SEARCH_CACHE = ConcurrentHashMap<String, SearchCache>()
+
+        /** 同一 cacheKey 的补扫/切片互斥：JSONArray 非线程安全，深搜追加与翻页切片必须串行。 */
+        private val SWEEP_LOCKS = ConcurrentHashMap<String, Any>()
+
+        /**
+         * 每个 chunk 扫多少个源。128 ≈ 64 并发下 2~3 波：
+         * 健康源 5~15s 出一块（千条级），死源块被预算截断后下轮从断点续扫。
+         */
+        private const val SWEEP_CHUNK = 128
+
+        /**
+         * 单个 chunk 最多占用多少秒预算。★不设上限就是「一个 25s 请求只推进 1 块」：
+         *
+         * 旧实现把 `remainSec`（= 剩余全部预算）交给一块，而 sweep 是**阻塞**等满预算的，
+         * 于是一个 25s 请求最多只扫 128 个源。库里 3660 个源 → 要 29 个请求、十几分钟才
+         * 走完一轮，吞吐被压到「几百本」。切成 8s 一片后同样的 25s 能推进 ~3 块；
+         * 被截断的块按「跑完的源数」记断点，下一轮从断点续扫，**不丢进度、不重扫**。
+         */
+        private const val SWEEP_CHUNK_BUDGET_SEC = 8L
+
         /** ★10 分钟 → 60 分钟（2026-10-01）：搜全可能耗十几分钟，翻页不能半路失效。 */
         private const val SEARCH_CACHE_TTL_MS = 60 * 60 * 1000L
         private const val SEARCH_CACHE_MAX = 16
@@ -440,15 +512,24 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
     // ─────────────────────────── 兼容端点 ───────────────────────────
 
     /**
-     * 兼容端点搜索。**支持分页**，供前端做「持续瀑布流」：
+     * 兼容端点搜索。**支持分页 + 不断续搜**，供前端做「持续瀑布流」：
      *
-     *   GET /thp/search?type=novel&q=剑来&page=1&limit=40&budget=8
+     *   GET /thp/search?type=novel&q=剑来&page=1&limit=40&budget=8[&restart=1]
      *
      * - type: novel | comic | music | video | **all**
      *   all = 一次扫描就把所有类型一起返回（每项带 type 字段）。
      *   旧调用方按类型逐个请求时要扫 4 遍，同一份工作量做 4 次；all 只做 1 次。
-     * - page/limit: 基于**该次扫描的完整结果**切片，翻页不重扫（见 SEARCH_CACHE）。
-     * - budget: 扫描时间预算(秒)。首屏用小值(如 8s)快速出结果，靠翻页预算更大再加深。
+     * - page/limit: 基于**累积结果**切片。存量不够这一刀时先补扫（见 [deepSweep]），
+     *   结果旧前新后追加 —— 已返回过的条目永远留在原位，翻页序稳定。
+     * - budget: 补扫时间预算(秒)。首屏用小值(如 8s)快速出结果，续拉用大值扫得更深。
+     * - restart=1: 显式要一次全新搜索（前端「搜索」按钮）。**不传时 page=1 也不会
+     *   推翻已有缓存** —— 那是「重试第 1 页」的正确姿势，否则首屏空结果时的续拉
+     *   会把深搜进度整个推倒重来、永远原地踏步。
+     *
+     * ★「不断续搜」（2026-10-02，治「几百/几千条就停止拉取」）：
+     *   hasMore = 「还没拉干存量 || 深搜未见底(!exhausted)」。只要 hasMore 为真，
+     *   调用方就该继续翻 —— **空页也要继续**（那只是「下一块还没扫出来」），
+     *   引擎会在后续请求里逐块把几万本乃至十几万本都扫出来，见底才说没有更多。
      *
      * 响应仍是旧草稿形状（object/items/data），另在顶层补 page/limit/total/hasMore/
      * truncated/budgetSec 供调用方翻页；多出的键对旧调用方无影响。
@@ -482,35 +563,30 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val page = (parms["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
         val limit = (parms["limit"]?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
         // ★ full=1：调用方明确要「搜全」——直接顶到预算上限，忽略 budget。
-        //   语义是「不设时间上限，扫完为止」，配合下面的累积合并，可分多次一路搜到底。
+        //   语义是「不设时间上限，扫完为止」，配合深搜累积，可分多次一路搜到底。
         val wantFull = parms["full"] == "1" || parms["full"] == "true"
         val budgetSec = (if (wantFull) SEARCH_BUDGET_FULL_SEC
         else parms["budget"]?.toLongOrNull() ?: SEARCH_BUDGET_DEFAULT_SEC)
             .coerceIn(SEARCH_BUDGET_MIN_SEC, SEARCH_BUDGET_MAX_SEC)
+        val restart = parms["restart"] == "1" || parms["restart"] == "true"
 
         val cacheKey = "$type|$q"
-        val now = System.currentTimeMillis()
-        var cache = SEARCH_CACHE[cacheKey]?.takeIf { now - it.createdAt <= SEARCH_CACHE_TTL_MS }
-
-        // 何时必须重扫：
-        //  ① 第一页永远重扫（用户要的是"再搜一次"的新结果，不能喂旧缓存）
-        //  ② 无缓存（翻页时缓存过期 → 直接告诉调用方重搜，别在这儿白等）
-        //  ③ 缓存是被截断的，且这次预算更大 → 值得为"加载更多"再扫一轮更深的
-        val deeper = cache != null && cache.truncated && budgetSec > cache.budgetSec
-        val needSweep = page == 1 || cache == null || deeper
-
-        if (page > 1 && cache == null) {
-            return json(409, err("no_cache", "上次搜索结果已过期（缓存 60 分钟），请重新搜索"))
-        }
-
-        if (needSweep) {
-            val swept = sweepSearch(q, wantType, budgetSec) ?: return json(502, err("source_error", "搜索失败"))
-            // ★ 累积合并（2026-10-01）：仅在「更深一轮」时合并，且只在上一轮被截断时。
-            //   旧行为是直接替换 —— 若新一轮在别的源上被截断，用户点"加载更多"反而**变少**。
-            //   现在已搜到的条目一律保留，只会越搜越多，直到 truncated=false（真的扫完了）。
-            val next = if (deeper) mergeCache(cache, swept) else swept
-            cache = next
-            SEARCH_CACHE[cacheKey] = next
+        val lock = SWEEP_LOCKS.computeIfAbsent(cacheKey) { Any() }
+        synchronized(lock) {
+            val now = System.currentTimeMillis()
+            val existing =
+                SEARCH_CACHE[cacheKey]?.takeIf { now - it.createdAt <= SEARCH_CACHE_TTL_MS }
+            if (page > 1 && existing == null) {
+                return json(409, err("no_cache", "上次搜索结果已过期（缓存 60 分钟），请重新搜索"))
+            }
+            // 新建缓存两种情形：确实没有；或调用方显式 restart 要全新搜索。
+            val c: SearchCache
+            if (existing == null || (restart && page == 1)) {
+                c = SearchCache(budgetSec)
+                SEARCH_CACHE[cacheKey] = c
+            } else {
+                c = existing
+            }
             // 简单清理：超量时丢掉最旧的一半，避免长驻进程里无限增长
             if (SEARCH_CACHE.size > SEARCH_CACHE_MAX) {
                 SEARCH_CACHE.entries
@@ -518,56 +594,129 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                     .take(SEARCH_CACHE.size - SEARCH_CACHE_MAX / 2)
                     .forEach { SEARCH_CACHE.remove(it.key) }
             }
-        }
+            val from = ((page - 1).toLong() * limit).toInt()
+            // 深搜补扫：存量不够这一刀就在预算内逐块扫；够了就直接切片（翻页不重扫）。
+            deepSweep(c, q, wantType, budgetSec, from, limit)
 
-        // 走到这里 cache 必非空（page>1 且 null 已在上面 409 返回）；取值一次，避免可空推断
-        val c = cache ?: return json(409, err("no_cache", "搜索结果不可用，请重新搜索"))
-        val full = c.items
-        val n = full.length()
-        val from = ((page - 1).toLong() * limit).toInt()
-        if (from >= n) {
-            // 页码超出：返回空页而不是报错，调用方据此停止加载
+            val full = c.items
+            val n = full.length()
+            val slice = JSONArray()
+            for (i in from until minOf(from + limit, n)) slice.put(full.get(i))
             return json(200, JSONObject()
-                .put("object", "list").put("items", JSONArray())
-                .put("data", JSONObject().put("items", JSONArray()))
+                .put("object", "list")
+                // 顶层扁平数组: v2/v4 后端降级归一化优先读 j.items, 缺了会把 j.data 当数组用而抛错
+                .put("items", slice)
+                .put("data", JSONObject().put("items", slice))
                 .put("page", page).put("limit", limit).put("total", n)
-                .put("hasMore", false).put("truncated", c.truncated)
+                // ★ 只要深搜还没见底就一直为真 —— 这是「几千条就停」的根治点：
+                //   旧版 hasMore 只反映缓存余量，翻干即停；现在存量拉干时会自动补扫。
+                .put("hasMore", from + limit < n || !c.exhausted)
+                .put("truncated", !c.exhausted)
                 .put("budgetSec", c.budgetSec)
-                .put("scannedSources", c.scannedSources)
+                .put("scannedSources", c.sweptSources)
                 .put("totalSources", c.totalSources))
         }
-        val slice = JSONArray()
-        for (i in from until minOf(from + limit, n)) slice.put(full.get(i))
-        return json(200, JSONObject()
-            .put("object", "list")
-            // 顶层扁平数组: v2/v4 后端降级归一化优先读 j.items, 缺了会把 j.data 当数组用而抛错
-            .put("items", slice)
-            .put("data", JSONObject().put("items", slice))
-            .put("page", page).put("limit", limit).put("total", n)
-            .put("hasMore", from + limit < n)
-            .put("truncated", c.truncated)
-            .put("budgetSec", c.budgetSec)
-            .put("scannedSources", c.scannedSources)
-            .put("totalSources", c.totalSources))
     }
 
-    /** 跑一轮全源扫描并归一化。wantType = -1 表示不限类型（type=all）。 */
-    private fun sweepSearch(q: String, wantType: Int, budgetSec: Long): SearchCache? {
-        val rd = EngineSearchController.search(mapOf("key" to listOf(q)), budgetSec)
-        if (!rd.isSuccess) return null
-        @Suppress("UNCHECKED_CAST")
-        val raw = (rd.data as? List<Map<String, Any?>>) ?: emptyList()
-        val items = JSONArray()
-        val seen = HashSet<String>()
+    /**
+     * 深搜补扫：把缓存从「当前存量」往「真正搜完」推进。
+     *
+     * 触发时机（每次翻页请求进来时）：
+     *   · 存量不够切这一刀（items.length - from < 2×limit）→ 在预算内逐块补扫；
+     *   · 新建缓存的首屏天然「不够」→ 预算内连续攒块。
+     * 每轮一个 chunk（见 SWEEP_CHUNK）：
+     *   1) 当前源内页还有源没过完 → 扫下一块；被预算截断时按「跑完的源数」记断点，下轮续扫；
+     *   2) 当前页全部源过完 → 有命中就翻源内下一页（sourcePage++、offset 归零），没命中就见底；
+     *   3) 见底（exhausted）→ 前端收到 hasMore=false 自然停。
+     *
+     * 为什么不跳过「上一页空结果」的源：那需要逐源记录返回历史，收益不确定而复杂度高；
+     * 宁可多扫一倍请求，也不少给用户结果。
+     */
+    private fun deepSweep(
+        cache: SearchCache,
+        q: String,
+        wantType: Int,
+        budgetSec: Long,
+        from: Int,
+        limit: Int,
+    ) {
+        val deadline = System.currentTimeMillis() + budgetSec * 1000
+        val reserve = limit * 2
+        while (!cache.exhausted) {
+            val now = System.currentTimeMillis()
+            if (now >= deadline) break
+            if (cache.items.length() - from >= reserve) break   // 存量已够这一刀，别让请求陪着扫
+            val all = SearchScope(AppConfig.searchScope).getBookSourceParts()
+            cache.totalSources = all.size
+            if (cache.sweepOffset >= all.size) {
+                // 当前源内页已把所有源过完一轮
+                if (cache.pageHits) {
+                    cache.sourcePage++
+                    cache.sweepOffset = 0
+                    cache.pageHits = false
+                    cache.chunkStart = -1
+                    cache.chunkAttempts = 0
+                    continue
+                }
+                cache.exhausted = true   // 整页零命中 → 所有源见底，搜完了
+                break
+            }
+            val chunkStart = cache.sweepOffset
+            val end = minOf(chunkStart + SWEEP_CHUNK, all.size)
+            val chunk = all.subList(chunkStart, end)
+            val remainSec = ((deadline - now + 999) / 1000).coerceAtLeast(1L)
+            // ★ 单块预算设上限（见 SWEEP_CHUNK_BUDGET_SEC）：让一个请求能推进多块，
+            //   而不是被第一块（可能整块都是死源）吃光全部预算。
+            val sliceSec = minOf(remainSec, SWEEP_CHUNK_BUDGET_SEC)
+            val r = EngineSearchController.sweep(chunk, q, cache.sourcePage, sliceSec)
+            // 断点推进：截断时 chunk 里只有一段前缀跑完（与列表顺序一致），从断点续扫、不回头；
+            // 整块跑完就整块推进。
+            val progressed =
+                if (r.truncated) r.scannedSources.coerceIn(0, chunk.size) else chunk.size
+            cache.sweepOffset = chunkStart + progressed
+            cache.sweptSources += r.scannedSources
+            if (r.roundHasItems) cache.pageHits = true
+            appendSweep(cache, r.items, wantType)
+            // ★ 零推进保险丝 —— **必须跨请求持久化**（见 SearchCache.chunkAttempts）：
+            //   整块都是「连得上却不响应」的死源时 progressed 恒为 0。旧实现把计数器放局部变量，
+            //   而这一块会把剩余预算吃光、下轮开头 `now >= deadline` 先 break，
+            //   于是「连续两轮零推进」永远攒不满 → 保险丝永不触发 → sweepOffset 被钉死，
+            //   每个请求都重扫同样那 128 个死源、total 再也不涨。
+            //   记在 cache 上后：同一块最多 2 个请求就被整块跳过，**保证前向推进**。
+            if (progressed == 0) {
+                if (cache.chunkStart == chunkStart) {
+                    cache.chunkAttempts++
+                } else {
+                    cache.chunkStart = chunkStart
+                    cache.chunkAttempts = 1
+                }
+                if (cache.chunkAttempts >= 2) {
+                    cache.sweepOffset = end          // 整块放弃，跳到下一块继续
+                    cache.chunkStart = -1
+                    cache.chunkAttempts = 0
+                }
+            } else {
+                cache.chunkStart = -1
+                cache.chunkAttempts = 0
+            }
+        }
+    }
+
+    /**
+     * 把一轮结果并入缓存：**旧前新后**追加、全局去重（[SearchCache.seenIds]）——
+     * 已翻过的页永远原位不动，翻页切片不会因补扫而错位（旧版「新前旧后」会让
+     * 用户点加载更多时看到列表跳序，2026-10-02 改为保序追加）。
+     */
+    private fun appendSweep(cache: SearchCache, raw: List<Map<String, Any?>>, wantType: Int) {
         for (b in raw) {
             val st = (b["sourceType"] as? Int) ?: 0
             if (wantType >= 0 && st != wantType) continue
             val bookUrl = (b["bookUrl"] as? String) ?: continue
             if (!isUsableBookUrl(bookUrl)) continue
             if (isErrorPageName(b["name"] as? String)) continue
-            if (!seen.add(bookUrl)) continue
+            if (!cache.seenIds.add(bookUrl)) continue   // 跨 chunk/跨源内页全局去重
             cachePut(bookUrl, b)
-            items.put(JSONObject()
+            cache.items.put(JSONObject()
                 .put("id", bookUrl)
                 .put("name", b["name"] ?: "")
                 .put("author", b["author"] ?: "")
@@ -581,52 +730,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 })
                 .put("sourceName", b["originName"] ?: ""))
         }
-        // 预算是否用满：实际扫完的源数 < 参与的源总数 → 还有源没跑完，结果还会增长
-        val truncated = EngineSearchController.lastTruncated
-        return SearchCache(
-            items = items,
-            createdAt = System.currentTimeMillis(),
-            budgetSec = budgetSec,
-            truncated = truncated,
-            scannedSources = EngineSearchController.lastScannedSources,
-            totalSources = EngineSearchController.lastTotalSources,
-        )
-    }
-
-    /**
-     * 把「更深一轮」的扫描结果并入上一轮缓存。
-     *
-     * 为什么需要它（过去真实症状）：全源扫描受时间预算截断时，不同的预算会在**不同的源上**停下。
-     * 旧实现是整份替换缓存 —— 于是用户点「加载更多（更大的 budget 重扫）」时，
-     * 新一轮如果恰好少扫到几个源，列表反而比上一轮**更短**，用户看到的就是「越加载越少」。
-     *
-     * 合并规则：
-     *   · 新一轮在前（它是更深的扫描，质量更高），旧一轮补在后面，按 id 去重；
-     *   · truncated / totalSources 以**新一轮**为准（它是更新的观测）；
-     *   · scannedSources 取两者较大值（真实"已扫过的源数"只会增加）。
-     * ⚠ 仅当旧缓存 truncated=true 时才合并 —— 旧缓存若是完整结果，新一轮只会是同一集合，
-     *   直接替换即可，没有合并的必要（也不该把两轮的排序差异暴露给用户）。
-     */
-    private fun mergeCache(old: SearchCache?, fresh: SearchCache): SearchCache {
-        if (old == null || !old.truncated) return fresh
-        val merged = JSONArray()
-        val seen = HashSet<String>()
-        for (i in 0 until fresh.items.length()) {
-            val o = fresh.items.optJSONObject(i) ?: continue
-            if (seen.add(o.optString("id"))) merged.put(o)
-        }
-        for (i in 0 until old.items.length()) {
-            val o = old.items.optJSONObject(i) ?: continue
-            if (seen.add(o.optString("id"))) merged.put(o)
-        }
-        return SearchCache(
-            items = merged,
-            createdAt = System.currentTimeMillis(),
-            budgetSec = maxOf(fresh.budgetSec, old.budgetSec),
-            truncated = fresh.truncated,
-            scannedSources = maxOf(fresh.scannedSources, old.scannedSources),
-            totalSources = fresh.totalSources,
-        )
+        cache.createdAt = System.currentTimeMillis()   // 活跃搜索别被 TTL 半路清掉
     }
 
     private fun chapters(parms: Map<String, String>): Response {

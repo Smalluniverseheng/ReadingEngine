@@ -36,6 +36,17 @@ import kotlin.math.min
 
 class SearchModel(private val scope: CoroutineScope, private val callBack: CallBack) {
     val threadCount = AppConfig.threadCount
+
+    /**
+     * 单源搜索超时(ms)。默认沿用旧值 30s（App 内全源搜索行为不变）；
+     * **深搜(chunk)路径会把它调小到 12s**，见 EngineSearchController.SWEEP_SOURCE_TIMEOUT_MS。
+     *
+     * 为什么必须能调小：全源搜索的并发槽只有 64 个，而一个「连得上却不响应」的死源会
+     * 独占一个槽直到 30s 超时。库里 3660 个源里死源占多数时，64 个槽会被整段占满，
+     * 单轮真正跑完的源数掉到几十个 —— 表现为「源越多、结果越少」。
+     * 调小超时 = 同一段时间里换掉更多死源，让活源能轮到并发槽。
+     */
+    var sourceTimeoutMs: Long = 30_000L
     private var searchPool: ExecutorCoroutineDispatcher? = null
     private var mSearchId = 0L
     private var searchPage = 1
@@ -56,7 +67,19 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
             .newFixedThreadPool(min(threadCount, AppConst.MAX_SEARCH_THREAD)).asCoroutineDispatcher()
     }
 
-    fun search(searchId: Long, key: String) {
+    /**
+     * @param sources 显式指定本轮要扫的源子集（深搜 chunk 用）。null = 走
+     *   [CallBack.getSearchScope] 的常规全源范围。**非空子集会跳过 scope 解析**，
+     *   这是「不断续搜」按块推进的实现基础（见 ThpServer.deepSweep）。
+     * @param startPage 新搜索从源内第几页开始（深搜翻页用）。同一 searchId 再次调用
+     *   仍走旧语义 `searchPage++`，本参数只在开启新搜索时生效。
+     */
+    fun search(
+        searchId: Long,
+        key: String,
+        sources: List<BookSourcePart>? = null,
+        startPage: Int = 1,
+    ) {
         synchronized(pageOwner) {
             if (searchId == mSearchId && pageOwner.isRunning()) return
             if (searchId != mSearchId) {
@@ -68,13 +91,13 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                     close()
                 }
                 searchBooks.clear()
-                bookSourceParts = callBack.getSearchScope().getBookSourceParts()
+                bookSourceParts = sources ?: callBack.getSearchScope().getBookSourceParts()
                 if (bookSourceParts.isEmpty()) {
                     callBack.onSearchCancel(NoStackTraceException("启用书源为空"))
                     return
                 }
                 mSearchId = searchId
-                searchPage = 1
+                searchPage = startPage.coerceAtLeast(1)
                 initSearchPool()
             } else {
                 searchPage++
@@ -108,7 +131,7 @@ class SearchModel(private val scope: CoroutineScope, private val callBack: CallB
                 progress.start(callBack::onSearchStart)
             }.mapParallelSafe(threadCount) {
                 try {
-                    withTimeout(30000L) {
+                    withTimeout(sourceTimeoutMs) {
                         WebBook.searchBookAwait(
                             it, key, page,
                             filter = { name, author, kind ->

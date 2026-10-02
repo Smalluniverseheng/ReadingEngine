@@ -20,8 +20,10 @@ static def releaseTime() {
     return new Date().format("yyMMddHH", TimeZone.getTimeZone("GMT+8"))
 }
 
-def name = "reading-engine"
-// 阅读引擎自有版本线, 与上游 Legado 版本号解耦
+def name = "thirdhub-engine-novel"
+// 小说引擎（ThirdHub-Engine-Novel）自有版本线，与上游 Legado 版本号解耦。
+// 本仓 = 上游「开源阅读 Legado 3.x」的**独立引擎**（非拆分之一）：一个开源项目 = 一个 App。
+// 它天生支持 小说+漫画+音乐+视频 四类内容 —— 能力全部保留、不人为阉割（PLAN-4.56-ENGINES.md §一）。
 // ★1.9.0（2026-10-02）：更新通道 —— 启动时拉自家引擎清单(downloads/engine/engines.json)，
 //   发现新版本提示更新（下载 / 忽略此版本）；24 小时节流 + 「自动更新」开关，默认开。
 //   上游 GitHub / 第三方 CDN 一律不接（见 EngineUpdateCheck / AppUpdateGitHub）。
@@ -29,7 +31,24 @@ def name = "reading-engine"
 // ★1.8.0（2026-10-01）：①免激活密码（EngineProfile.PASSWORD_GATE_ENABLED=false，
 //   框架保留、日后一行改回）②搜索不再中途截断（预算上限 120s→1800s、新增 full=1、
 //   更深一轮**累积合并**而非替换）。versionCode 由版本号推导 → 10800，单调递增。
-def version = "1.9.0"
+// ★1.10.0（2026-10-02）：①「不断续搜」深度翻页搜索 —— 按块(chunk)补扫源、
+//   源内翻页、真见底才 hasMore=false，治「几百/几千条就停止拉取」；断点续扫
+//   不回头、结果旧前新后保序追加。②能力不设限 + 单产物化：本引擎天生支持
+//   小说+漫画+音乐+视频 四类内容（全部保留、不阉割），且**不再按内容类型切
+//   flavor** —— 一个开源项目只出一个 App（原来的 5 产物拆分已删除）。
+//   搜索也不再按类型白名单卡源。versionCode 由版本号推导 → 11000，单调递增。
+// ★1.11.0（2026-10-02）：**补发 1.10.0 的引擎二进制**。
+//   ⚠️ 事故复盘：1.10.0 的「不断续搜」只改了本地源码、**从未推送**，随包发出的
+//   app-release.apk 是当日 13:55 编的旧二进制（meta.version 仍报 1.5.5，行为上
+//   hasMore 仍是 `from+limit<n`）→ 首屏 8s 只扫完 45/3660 个源、只出 28 条，
+//   就被判 hasMore=false，前端第一页即停 = 用户报的「收几本就停 + 显示时间预算」。
+//   本版把深搜真正出包，并修掉深搜自身三处缺陷：
+//     ①零推进保险丝改为**跨请求持久化**（原来放局部变量，预算被死源块吃光后
+//       deadline 先 break，保险丝永远攒不满 → sweepOffset 被钉死在同一块）；
+//     ②单块预算设上限 8s（原来一块吃掉剩余全部预算 → 25s 请求最多只推进 128 源）；
+//     ③深搜单源超时 30s → 12s（64 个并发槽被挂死源占满，是「源越多结果越少」之根）。
+//   versionCode 由版本号推导 → 11100，单调递增、可覆盖安装。
+def version = "1.11.0"
 // versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
 // 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
 def versionCodeValue = {
@@ -81,6 +100,24 @@ android {
                 'zh-rHK',
                 'zh-rTW'
         ]
+        // ★ 单产物化（2026-10-02，用户指令）：本基座是**一个** Legado 系独立引擎，
+        //   不再按内容类型切 flavor、也不再把一个开源项目拆成多个 App。
+        //   它天生支持 小说+漫画+音乐+视频 四类内容 —— 「它能支持什么就让它支持什么」，
+        //   能力一律保留、不人为阉割。四个独立引擎各有各的上游（Venera/LX Music/TVBox），
+        //   各自在自己的仓里出包，与本仓无关。
+        manifestPlaceholders.put("APP_CHANNEL_VALUE", "app")
+        manifestPlaceholders.put("app_name", "小说引擎")
+        // ★ 引擎身份（单产物化后不再有 BuildConfig.FLAVOR）：
+        //   ENGINE_ID 是**引擎清单 downloads/engine/engines.json 里 items[].id 的对应键**，
+        //   引擎启动时的更新检查靠它挑出"自己那一条"。此前用的是 BuildConfig.FLAVOR，
+        //   而 flavor 一旦拆除，FLAVOR 就不再生成 → 更新检查要么编不过、要么恒挑不到自己那条
+        //   （表现是"永远已是最新版本"，静默失效、最难查）。
+        buildConfigField "String", "ENGINE_ID", "\"novel\""
+        buildConfigField "String", "ENGINE_NAME", "\"小说引擎\""
+        buildConfigField "String", "ENGINE_MODULES", "\"novel,comic,music,video\""
+        // 空 = 不按类型过滤源（装什么源就搜什么源）
+        buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"\""
+
         project.ext.set("archivesBaseName", name + "_" + version)
 
         if (armOnly) {
@@ -112,9 +149,9 @@ android {
                 signingConfig = signingConfigs.myConfig
             }
             applicationIdSuffix '.release'
-            // ★ app_name 由 productFlavor 决定（见下方 productFlavors）。
-            //   AGP 的 manifestPlaceholders 优先级是 buildType > flavor，
-            //   所以这里**绝不能**再写 app_name，否则五个产物会全叫「阅读引擎」。
+            // ★ app_name 由 defaultConfig 的 manifestPlaceholders 决定（单产物化后
+            //   已无 flavor）。AGP 的 manifestPlaceholders 优先级是 buildType >
+            //   defaultConfig，所以这里**绝不能**再写 app_name，否则会被覆盖。
 
             minifyEnabled true
             shrinkResources = true
@@ -131,64 +168,14 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro', 'cronet-proguard-rules.pro'
         }
     }
-    //noinspection GrDeprecatedAPIUsage
-    flavorDimensions = ['mode']
-    /**
-     * 五产物：四合一「阅读引擎」 + 小说/漫画/音乐/视频 四个独立 App。
-     *
-     *   包名    com.legado.app[.novel|.comic|.music|.video].release
-     *   源包    app/src/<flavor>/assets/defaultData/bookSources.json（由 tools/build-engine-source-packs.cjs 生成）
-     *
-     * ENGINE_MODULES / ENGINE_SOURCE_TYPES 是**编译期**注入的能力白名单，运行期由
-     * EngineProfile 读取：只声明本模块的 THP caps、只允许本类型的书源参与搜索。
-     */
-    productFlavors {
-        app {
-            dimension "mode"
-            manifestPlaceholders.put("APP_CHANNEL_VALUE", "app")
-            manifestPlaceholders.put("app_name", "@string/app_name")
-            buildConfigField "String", "ENGINE_NAME", "\"阅读引擎\""
-            buildConfigField "String", "ENGINE_MODULES", "\"novel,comic,music,video\""
-            // 空 = 不按类型过滤（四合一装全部源）
-            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"\""
-        }
-        novel {
-            dimension "mode"
-            applicationIdSuffix ".novel"
-            manifestPlaceholders.put("APP_CHANNEL_VALUE", "novel")
-            manifestPlaceholders.put("app_name", "小说引擎")
-            buildConfigField "String", "ENGINE_NAME", "\"小说引擎\""
-            buildConfigField "String", "ENGINE_MODULES", "\"novel\""
-            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"0,3\""
-        }
-        comic {
-            dimension "mode"
-            applicationIdSuffix ".comic"
-            manifestPlaceholders.put("APP_CHANNEL_VALUE", "comic")
-            manifestPlaceholders.put("app_name", "漫画引擎")
-            buildConfigField "String", "ENGINE_NAME", "\"漫画引擎\""
-            buildConfigField "String", "ENGINE_MODULES", "\"comic\""
-            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"2\""
-        }
-        music {
-            dimension "mode"
-            applicationIdSuffix ".music"
-            manifestPlaceholders.put("APP_CHANNEL_VALUE", "music")
-            manifestPlaceholders.put("app_name", "音乐引擎")
-            buildConfigField "String", "ENGINE_NAME", "\"音乐引擎\""
-            buildConfigField "String", "ENGINE_MODULES", "\"music\""
-            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"1\""
-        }
-        video {
-            dimension "mode"
-            applicationIdSuffix ".video"
-            manifestPlaceholders.put("APP_CHANNEL_VALUE", "video")
-            manifestPlaceholders.put("app_name", "视频引擎")
-            buildConfigField "String", "ENGINE_NAME", "\"视频引擎\""
-            buildConfigField "String", "ENGINE_MODULES", "\"video\""
-            buildConfigField "String", "ENGINE_SOURCE_TYPES", "\"4\""
-        }
-    }
+    // ★ 2026-10-02 单产物化（用户指令）：此处原有的 `flavorDimensions` + 5 个
+    //   `productFlavors`（app/novel/comic/music/video）已整体删除。
+    //   那 5 个产物共用同一份源码、同一个 applicationId 前缀，在用户眼里就是
+    //   「同一个软件切了五份」—— 正是他指出「不要把开源阅读拆分成的四个模块
+    //   当成我要的引擎」的那个错误形态（见 docs/PLAN-4.56-ENGINES.md §一）。
+    //   现在本仓只出**一个** App：一个 Legado 系独立引擎，四类能力全保留。
+    //   四个独立引擎分别来自四个上游，各在自己的仓里构建，不在本仓切分。
+    //   （原 app flavor 的四个 buildConfigField/占位符已上移到 defaultConfig。）
 
     room {
         schemaDirectory "$projectDir/schemas"

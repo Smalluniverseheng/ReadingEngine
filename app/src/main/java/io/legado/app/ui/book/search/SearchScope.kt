@@ -6,7 +6,6 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourceCheckState
 import io.legado.app.data.entities.BookSourcePart
-import io.legado.app.engine.EngineProfile
 import io.legado.app.help.config.AppConfig
 import io.legado.app.utils.splitNotBlank
 import splitties.init.appCtx
@@ -140,10 +139,13 @@ data class SearchScope(private var scope: String) {
                 }
             }
         }
-        // ★ 五产物化：按产物声明的源类型白名单过滤（见 EngineProfile）。
-        //  「小说引擎」不该被拖去扫图片源、「漫画引擎」也不该扫文本源：
-        //   广播 caps 只挡住了 THP 调用方，App 内的搜索/发现走的是这条路径。
-        //   四合一（app）的白名单为空集合 → 不过滤，行为与旧版完全一致。
+        // ★ 2026-10-02 起**不再按源类型过滤**（用户指令：「谁说一个引擎只能支持
+        //   一种功能？不要强制要求这个引擎能干啥，它能支持什么就让它支持什么」）。
+        //   旧版这里按 EngineProfile.allowsSourceType 白名单把非本产物类型的源
+        //   直接踢出搜索 —— 用户往「小说引擎」导入的漫画源永远搜不到，属于人为
+        //   阉割。本基座天生支持 小说+漫画+音乐+视频 四类，现在库里有什么源就
+        //   搜什么源；出厂源包仍按类型策展（见各 flavor 的 assets 源包），
+        //   产物差异只在「出厂带什么源」，不在「能搜什么源」。
         // ★ 先按健康度、再按响应速度、最后按自定义顺序排。
         //
         // 为什么不能只按 customOrder：搜索有**固定时间预算**（THP 默认 20s，App 内 25s），
@@ -159,7 +161,6 @@ data class SearchScope(private var scope: String) {
         // 用 thenBy 链而不是 compareBy 的多 selector 重载：后者要在一组返回类型
         // 不同的 lambda 之间做类型推断（Int / Long），显式类型参数的写法更稳。
         return list
-            .filter { EngineProfile.allowsSourceType(it.bookSourceType) }
             .sortedWith(
                 compareBy<BookSourcePart> { healthRank(it) }
                     .thenBy { respondKey(it) }

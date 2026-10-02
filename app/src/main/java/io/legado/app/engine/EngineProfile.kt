@@ -9,22 +9,28 @@ import java.net.URL
 import java.security.MessageDigest
 
 /**
- * 引擎档案（编译期五产物化 + 运行期首次激活门）。
+ * 引擎档案（编译期身份 + 运行期首次激活门）。
  *
- * 五产物共用同一份源码，靠 productFlavor 注入的 BuildConfig 字段分化：
+ * ★ 2026-10-02 起本仓是**单产物**：一个开源项目（Legado 系基座）只出一个 App。
+ *   此前用 productFlavor 切 5 个产物（app/novel/comic/music/video）的做法，
+ *   在用户眼里就是「同一个软件切了五份」—— 正是他否掉的形态（见
+ *   docs/PLAN-4.56-ENGINES.md §一）。四个独立引擎各有各的上游
+ *   （Legado / Venera / LX Music / TVBox），各在自己的仓里出包，不在本仓切分。
  *
- * | flavor | 包名后缀 | ENGINE_MODULES | ENGINE_SOURCE_TYPES | 出厂源包 |
- * |--------|----------|----------------|---------------------|----------|
- * | app    | (无)     | 四模块          | 空(不过滤)           | 全量 3898 |
- * | novel  | .novel   | novel          | 0,3                 | 3610 |
- * | comic  | .comic   | comic          | 2                   | 101 |
- * | music  | .music   | music          | 1                   | 65 |
- * | video  | .video   | video          | 4                   | 122 |
+ *   身份由 defaultConfig 注入的 BuildConfig 字段决定：
+ *   · ENGINE_NAME          = 「阅读引擎」
+ *   · ENGINE_MODULES       = novel,comic,music,video  ← 四类**全部保留**
+ *   · ENGINE_SOURCE_TYPES  = 空（不按类型过滤源）
  *
- * ★为什么能力白名单要编译期注入而不是运行时配置：
- * UDP 广播里的 caps 是前端**在发现之前**唯一的判据（见 EngineBeacon.CAPS 注释）。
- * 如果「漫画引擎」广播 `m:novel,m:comic,...`，前端会把小说搜索也派给它，
- * 而它库里根本没有文本源 —— 表现为"连上了但搜出来永远是空"，比不广播更糟。
+ * ★ 能力不设限（用户指令：「谁说一个引擎只能支持一种功能？不要强制要求这个
+ *   引擎能干啥，它能支持什么就让它支持什么」）：本基座（开源阅读 Legado 系）
+ *   天生支持 小说+漫画+音乐+视频 四类内容，一律声明全四模块；
+ *   ENGINE_SOURCE_TYPES 只是「出厂源包按类型策展」的标签（供展示/审计），
+ *   **不卡搜索范围** —— 用户导入任何类型的源都参与搜索（见 SearchScope）。
+ *
+ * （旧设计的顾虑「没源的模块别广播 caps」在多引擎并存下不再成立：一个引擎搜
+ *   某类型为空只是「它没有这类源」，同网络下别的引擎会有 —— 前端多引擎归并
+ *   去重本来就是按「谁有结果」聚合的。）
  *
  * ── 首次激活 ──
  * 内置源是私货，装完第一次打开必须输入密码才解锁：
@@ -68,8 +74,9 @@ object EngineProfile {
         get() = BuildConfig.ENGINE_SOURCE_TYPES
             .split(',').mapNotNull { it.trim().toIntOrNull() }.toSet()
 
-    /** 是否四合一产物（四类源都装）。 */
-    val isAllInOne: Boolean get() = modules.size >= 4
+    /** 是否「四类全装」的产物。★1.10.0 单产物化后本仓只剩一个 App，
+     *  ENGINE_SOURCE_TYPES 为空（不按类型策展源）且四模块俱全 → 恒为 true。 */
+    val isAllInOne: Boolean get() = modules.size >= 4 && sourceTypes.isEmpty()
 
     fun allowsModule(module: String): Boolean = modules.isEmpty() || module in modules
 

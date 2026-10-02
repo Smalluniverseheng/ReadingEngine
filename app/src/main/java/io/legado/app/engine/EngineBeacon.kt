@@ -54,9 +54,10 @@ object EngineBeacon {
      * 唯一的判据，两者不一致会导致"发现时以为不支持，连上后才发现支持"。
      *
      * ★2026-09-30 五产物化：不再硬编码四模块，改为按 productFlavor 注入的
-     * ENGINE_MODULES 生成（见 EngineProfile.caps）。「漫画引擎」只广播 `m:comic`
-     * —— 广播自己做不到的能力，前端会把小说搜索也派过来，而它库里没有文本源，
-     * 表现为"连上了但永远是空结果"。
+     * ENGINE_MODULES 生成（见 EngineProfile.caps）。
+     * ★2026-10-02 能力不设限（用户指令「它能支持什么就让它支持什么」）：
+     * 五产物一律声明全四模块，广播的就是代码真实能力；某引擎搜某类型为空
+     * 只是「它没装这类源」，多引擎归并按「谁有结果」聚合，不再靠阉割 caps 躲。
      */
     val CAPS: String get() = EngineProfile.capsString
 

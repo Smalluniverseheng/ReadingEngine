@@ -42,7 +42,10 @@ import java.time.format.DateTimeFormatter
  *         "sha256": "…", "url": "https://…" }
  *     ]
  *   }
- * 变体对齐：items[].id 与 BuildConfig.FLAVOR（app/novel/comic/music/video）同名。
+ * 引擎身份对齐：items[].id 与 BuildConfig.ENGINE_ID 同名（novel / comic / music / video …）。
+ *   ★ 2026-10-02 改：原来靠 BuildConfig.FLAVOR 挑自己那一条。拆除产品变体（flavor）后
+ *   FLAVOR 不再生成 —— 更新检查要么编不过、要么永远挑不到自己那条（静默"已是最新版本"）。
+ *   改为显式的引擎身份常量 ENGINE_ID，与"怎么打包"彻底解耦。
  */
 object EngineUpdateCheck : AppUpdate.AppUpdateInterface {
 
@@ -57,7 +60,7 @@ object EngineUpdateCheck : AppUpdate.AppUpdateInterface {
             val body = fetchManifest()
             val manifest = parseManifestJson(body)
                 ?: throw NoStackTraceException("引擎清单读取失败")
-            pickUpdateInfo(manifest, BuildConfig.FLAVOR, BuildConfig.VERSION_NAME)
+            pickUpdateInfo(manifest, BuildConfig.ENGINE_ID, BuildConfig.VERSION_NAME)
                 ?: throw NoStackTraceException("已是最新版本")
         }
     }
