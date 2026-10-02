@@ -138,6 +138,17 @@ class EngineSetupActivity : AppCompatActivity() {
     }
 
     private fun refreshStatus() {
+        // ★2026-10-03: 源数此前只在 onResume 统计一次，而 18MB 出厂源是**异步**入库的 ——
+        //   onResume 那一刻通常还没导完，于是记下一个 0；之后 refreshStatus 只重绘旧值、
+        //   不再重查，界面上「可用书源: 0 条」就一直挂着。本机模拟器实测正是这个假象：
+        //   界面报 0 条，而库里其实已经有 **3853** 条源。用户看到「0 条」会以为引擎是空的。
+        //   改为「只要还没统计到正数，每次刷新都补查一次；拿到正数就停」，既不误报也不滥用 IO。
+        if (cachedSourceCount <= 0) {
+            Coroutine.async {
+                runCatching { appDb.bookSourceDao.allEnabled.size }
+                    .getOrNull()?.let { if (it > 0) cachedSourceCount = it }
+            }
+        }
         val host = EngineBeacon.lanHost()
         tvStatus.text = buildString {
             // ★2026-10-03: 这一行以前读的是 `WebService.isRun` —— 那是**附属的 Web 调试服务**
