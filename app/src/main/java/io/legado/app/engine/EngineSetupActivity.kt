@@ -68,9 +68,14 @@ class EngineSetupActivity : AppCompatActivity() {
 
         root.addView(actionButton("重启引擎服务") {
             WebService.startForeground(this)
+            // ★2026-10-03: 旧写法只 ensureStarted()，UDP 广播（THP/1 HELLO）不会重启 ——
+            //   于是「重启引擎服务」之后局域网上仍发现不了本机。这里补上 EngineBeacon.start()。
+            EngineBeacon.start()
             ThpServer.ensureStarted()
             tvStatus.postDelayed({ refreshStatus() }, 500)
-            toast("引擎服务已重新拉起")
+            val err = ThpServer.lastError
+            // 失败不再静默：以前无论成没成都提示「已重新拉起」，用户以为好了，其实没有。
+            toast(if (err.isEmpty()) "引擎服务已重新拉起" else "引擎启动失败：$err")
         })
 
         // ★ 激活段落随门禁开关显隐：自用形态（PASSWORD_GATE_ENABLED=false）下不显示，
@@ -135,7 +140,14 @@ class EngineSetupActivity : AppCompatActivity() {
     private fun refreshStatus() {
         val host = EngineBeacon.lanHost()
         tvStatus.text = buildString {
-            appendLine("引擎服务:  ${if (WebService.isRun) "运行中" else "启动中…"}")
+            // ★2026-10-03: 这一行以前读的是 `WebService.isRun` —— 那是**附属的 Web 调试服务**
+            //   (:1122) 状态，与引擎本体(THP :1234)是两条独立链路。于是 THP 根本没起来时，
+            //   这行依然显示「启动中…」，用户和排查者都无从分辨（本机模拟器实测就卡死在这里）。
+            //   现在按引擎本体的真实状态显示，并把启动失败原因一并暴露出来。
+            appendLine("引擎服务:  ${if (ThpServer.isRunning) "运行中 · THP :${ThpServer.PORT}" else "未启动"}")
+            val thpErr = ThpServer.lastError
+            if (thpErr.isNotEmpty()) appendLine("启动失败:  $thpErr")
+            appendLine("Web 服务:  ${if (WebService.isRun) "运行中" else "未启动"}（本机调试用，与引擎搜索无关）")
             appendLine("产物:  ${EngineProfile.displayName}${if (EngineProfile.isAllInOne) "（四合一）" else ""}")
             appendLine("支持模块:  ${EngineProfile.modules.joinToString(" / ") { moduleName(it) }}")
             appendLine(

@@ -245,10 +245,43 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         )
 
         @Synchronized
+        /**
+         * 最近一次启动失败原因（空 = 没失败过）。★2026-10-03 新增。
+         *
+         * 旧实现把异常整个吞进 `runCatching {}` —— 于是「引擎装了、THP 却起不来」这件事
+         * 在任何地方都看不到：设置页那行「引擎服务」读的是 **WebService.isRun**（另一条链路），
+         * 永远显示「启动中…」，logcat 里一个字都没有。本机模拟器上就卡死在这一步：
+         * 1234 端口始终不监听，排查时零线索。现在失败必须留痕。
+         */
+        @Volatile
+        var lastError: String = ""
+            private set
+
+        /** THP 是否真的在监听 —— 判断依据是实例存活，**不是** WebService。 */
+        val isRunning: Boolean get() = instance?.isAlive == true
+
+        /**
+         * 启动 THP 服务。**不再静默失败**：失败时写 [lastError] 并打日志。
+         *
+         * ★这里同时也是「同机新旧引擎抢端口」的观测点：旧产物
+         * `com.thirdhub.engine.novel` 与新产物各自独立安装、都开机自启，却硬编码同一个
+         * [PORT] —— 谁先起谁占，后起的 BindException；而前端连到的就是「先起来的那颗」。
+         * 若先起来的是不含深搜的旧产物，用户看到的就是「搜几本就停」。
+         * 这类冲突以前完全不可见，现在会明确报出来。
+         */
+        @Synchronized
         fun ensureStarted() {
-            if (instance?.isAlive == true) return
-            runCatching {
+            if (instance?.isAlive == true) {
+                lastError = ""
+                return
+            }
+            try {
                 instance = ThpServer(PORT).apply { start(SOCKET_READ_TIMEOUT, false) }
+                lastError = ""
+            } catch (t: Throwable) {
+                instance = null
+                lastError = "${t.javaClass.simpleName}: ${t.message}"
+                android.util.Log.e("ThpServer", "THP 启动失败 port=$PORT → $lastError", t)
             }
         }
 

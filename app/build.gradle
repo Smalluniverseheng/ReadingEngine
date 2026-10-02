@@ -47,8 +47,8 @@ def name = "thirdhub-engine-novel"
 //       deadline 先 break，保险丝永远攒不满 → sweepOffset 被钉死在同一块）；
 //     ②单块预算设上限 8s（原来一块吃掉剩余全部预算 → 25s 请求最多只推进 128 源）；
 //     ③深搜单源超时 30s → 12s（64 个并发槽被挂死源占满，是「源越多结果越少」之根）。
-//   versionCode 由版本号推导 → 11100，单调递增、可覆盖安装。
-def version = "1.11.0"
+//   versionCode 由版本号推导 → 11101，单调递增、可覆盖安装。
+def version = "1.11.1"
 // versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
 // 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
 def versionCodeValue = {

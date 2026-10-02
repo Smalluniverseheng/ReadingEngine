@@ -75,9 +75,21 @@ class App : Application() {
         //   详见 NotificationChannels 的注释。
         NotificationChannels.ensure()
         // 阅读引擎: 开机即用 —— 自动启动本地 Web 服务与局域网广播
+        // ★2026-10-03 拆成两个独立 runCatching。旧实现把两行塞在同一个块里，
+        //   而 Android 12+ 从后台启动前台服务会抛 ForegroundServiceStartNotAllowedException
+        //   （Application.onCreate 时进程往往还不是 TOP）——于是**第一行一抛，
+        //   第二行 EngineBeacon.start() 就被连坐跳过**，THP :1234 永远不启动，
+        //   前端连不上引擎，而日志里只看到 WebService 反复 onCreate/onDestroy。
+        //   WebService(:1122) 只是本机调试用的附属功能，它失败不该拖垮引擎本体。
         runCatching {
             io.legado.app.service.WebService.startForeground(this)
+        }.onFailure {
+            android.util.Log.w("App", "WebService 启动失败（不影响引擎本体）: $it")
+        }
+        runCatching {
             io.legado.app.engine.EngineBeacon.start()
+        }.onFailure {
+            android.util.Log.e("App", "EngineBeacon 启动失败: $it", it)
         }
         if (isDebuggable) {
             ThreadUtils.hasSubtleSideEffectsSetThreadAssertsDisabledForTesting(true)
