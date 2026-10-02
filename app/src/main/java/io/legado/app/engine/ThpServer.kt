@@ -244,7 +244,6 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             "/thp/search", "/thp/chapters", "/thp/content", "/thp/discover", "/thp/explore"
         )
 
-        @Synchronized
         /**
          * 最近一次启动失败原因（空 = 没失败过）。★2026-10-03 新增。
          *
