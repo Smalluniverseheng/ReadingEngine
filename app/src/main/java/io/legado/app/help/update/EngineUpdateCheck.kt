@@ -7,6 +7,7 @@ import io.legado.app.help.coroutine.Coroutine
 import kotlinx.coroutines.CoroutineScope
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -159,17 +160,26 @@ internal fun buildUpdateLog(manifest: EngineManifest, item: EngineManifestItem):
     return body.trimEnd() + "\n\n（需要客户端 App $minApp 及以上）"
 }
 
-/** "2026-10-01 15:15:00" / "2026-10-01 15:15" / ISO → epoch millis；解析不了回 0（对话框不显示日期）。 */
+/** "2026-10-01 15:15:00" / "2026-10-01 15:15" / "2026-10-01" → epoch millis；解析不了回 0（对话框不显示日期）。 */
 internal fun parseReleasedAtMillis(text: String?): Long {
     val t = text?.trim().orEmpty()
     if (t.isEmpty()) return 0L
-    for (pattern in listOf("yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd")) {
+    for (pattern in listOf("yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm")) {
         try {
             val ldt = LocalDateTime.parse(t, DateTimeFormatter.ofPattern(pattern))
             return ldt.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         } catch (e: Exception) {
             // 试下一个格式
         }
+    }
+    // 只有日期没有时间必须走 LocalDate：拿 LocalDateTime 解析纯日期会因
+    // 缺时分秒字段直接抛（"time is not present"），结果是明明写了发布日期却被
+    // 当成"没有日期"。CI 单测 releasedAtParsesLeniently 抓过这个坑，别退回。
+    try {
+        return LocalDate.parse(t, DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    } catch (e: Exception) {
+        // 认不出的写法（如"昨天"）回 0：宁可不显示日期，不显示错日期
     }
     return 0L
 }
