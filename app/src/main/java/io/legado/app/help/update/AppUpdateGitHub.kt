@@ -10,11 +10,14 @@ import splitties.init.appCtx
 /**
  * 中性化说明
  * ──────────────────────────────────────────────────────────────
- * 本引擎是纯本地软件, 不含任何在线更新通道:
+ * 上游 Legado 的 GitHub Releases 查询**不接**:
  *   · 已移除上游 Legado 的 GitHub Releases 查询
  *   · 已移除第三方 CDN 镜像(cdn.mgz.la / cdn.gigu.edu.kg 等)的解析入口
- * 保留本类仅为满足 AppUpdateInterface 的形状, check/checkBeta 一律直接返回失败,
- * 不发起任何网络请求。更新引擎请重新获取新的安装包。
+ *
+ * ★ 运行期的更新公告走的是 EngineUpdateCheck（自家引擎清单），
+ *   本类只是旧 GitHub 通道的解析层与测试夹具（AppUpdateSelectorTest 仍在用
+ *   本文件里的 toUpdateInfo / AppReleaseInfo 链路），check/checkBeta 一律直接
+ *   返回失败、不发起任何网络请求。
  */
 @Keep
 @Suppress("unused")

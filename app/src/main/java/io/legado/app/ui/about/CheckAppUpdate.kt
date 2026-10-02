@@ -13,7 +13,7 @@ fun Fragment.checkAppUpdate(beta: Boolean = false) {
     val waitDialog = WaitDialog(requireContext())
     waitDialog.show()
     val request = if (beta) AppUpdate.checkBeta(lifecycleScope)
-        else AppUpdate.gitHubUpdate.check(lifecycleScope)
+        else AppUpdate.engineUpdate.check(lifecycleScope)
     request.onSuccess {
         if (isAdded && !childFragmentManager.isStateSaved) showDialogFragment(UpdateDialog(it))
     }.onError {

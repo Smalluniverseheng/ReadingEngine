@@ -5,12 +5,17 @@ import kotlinx.coroutines.CoroutineScope
 
 object AppUpdate {
 
-    val gitHubUpdate: AppUpdateInterface by lazy {
-        AppUpdateGitHub
+    /**
+     * 更新通道 —— 自家引擎清单（EngineUpdateCheck）。
+     * 上游 GitHub / 第三方 CDN 一律不接，见 EngineUpdateCheck 与 AppUpdateGitHub 的说明。
+     */
+    val engineUpdate: AppUpdateInterface by lazy {
+        EngineUpdateCheck
     }
 
+    /** 只有一条更新通道，beta 检查与正式检查同源。 */
     fun checkBeta(scope: CoroutineScope): Coroutine<UpdateInfo> =
-        AppUpdateGitHub.checkBeta(scope)
+        EngineUpdateCheck.check(scope)
 
     data class UpdateInfo(
         val tagName: String,

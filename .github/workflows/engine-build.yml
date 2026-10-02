@@ -80,6 +80,15 @@ jobs:
           check_pack music "1"
           check_pack video "4"
 
+      - name: 单测（引擎更新通道决策层）
+        run: |
+          chmod +x gradlew
+          # 只跑更新通道的纯决策层（变体选包 / 版本比较 / 说明兜底）。
+          # 不跑全量单测：存量用例不属本次改动，别让它们挡住出包。
+          ./gradlew :app:testAppReleaseUnitTest \
+            --tests "io.legado.app.help.update.EngineUpdateCheckTest" \
+            --max-workers=2 --warning-mode=summary
+
       - name: 构建五个 Release APK
         env:
           ENGINE_KEY_PASSWORD: ${{ secrets.ENGINE_KEY_PASSWORD }}

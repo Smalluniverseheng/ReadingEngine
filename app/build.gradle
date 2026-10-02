@@ -22,10 +22,14 @@ static def releaseTime() {
 
 def name = "reading-engine"
 // 阅读引擎自有版本线, 与上游 Legado 版本号解耦
+// ★1.9.0（2026-10-02）：更新通道 —— 启动时拉自家引擎清单(downloads/engine/engines.json)，
+//   发现新版本提示更新（下载 / 忽略此版本）；24 小时节流 + 「自动更新」开关，默认开。
+//   上游 GitHub / 第三方 CDN 一律不接（见 EngineUpdateCheck / AppUpdateGitHub）。
+//   CI 出包前跑 EngineUpdateCheckTest（变体选包 / 版本比较 / 说明兜底）。
 // ★1.8.0（2026-10-01）：①免激活密码（EngineProfile.PASSWORD_GATE_ENABLED=false，
 //   框架保留、日后一行改回）②搜索不再中途截断（预算上限 120s→1800s、新增 full=1、
 //   更深一轮**累积合并**而非替换）。versionCode 由版本号推导 → 10800，单调递增。
-def version = "1.8.0"
+def version = "1.9.0"
 // versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
 // 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
 def versionCodeValue = {

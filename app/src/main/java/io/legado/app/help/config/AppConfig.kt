@@ -1079,7 +1079,9 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     // 中性化: 本地引擎默认不自动检查更新(无在线更新通道)
-    val autoUpdateVariant get() = appCtx.getPrefBoolean("autoUpdateVariant", false)
+    // 与 pref_config_other.xml 的 defaultValue="true" 对齐：代码默认曾是 false，
+    // 会把「启动时提示引擎更新」变成不开设置就永不生效的死开关。
+    val autoUpdateVariant get() = appCtx.getPrefBoolean("autoUpdateVariant", true)
 }
 
 internal fun normalizeJsSourceApiToken(value: String?): String? {
