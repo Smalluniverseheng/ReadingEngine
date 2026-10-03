@@ -82,9 +82,18 @@ object EngineProfile {
 
     fun allowsSourceType(type: Int): Boolean = sourceTypes.isEmpty() || type in sourceTypes
 
-    /** THP caps 数组（`m:<module>` + post-query）。与 EngineBeacon.CAPS 必须同源。 */
+    /**
+     * THP caps 数组（`m:<module>` + post-query）。与 EngineBeacon.CAPS 必须同源。
+     *
+     * ★2026-10-03 新增两项（协议只增不减，见 THP §15）：
+     *  · `search-mode` —— `/thp/search` 认 `mode` 参数（fuzzy 模糊 / exact 精确 / deep 搜到底）。
+     *    为什么要声明：前端在**发现阶段**（还没连上）就要知道能不能给用户那个开关，
+     *    不声明的话只能连上以后试错，试错失败的表现是"开关点了没反应"。
+     *  · `stream-search` —— `/thp/search?...&stream=1` 返回 NDJSON 流，结果边扫边推，
+     *    不用等整轮扫完（治「等半天然后一下子冒出来」的体感问题）。
+     */
     val caps: List<String>
-        get() = modules.map { "m:$it" } + "post-query"
+        get() = modules.map { "m:$it" } + "post-query" + "search-mode" + "stream-search"
 
     /** UDP 广播用的逗号串。 */
     val capsString: String get() = caps.joinToString(",")

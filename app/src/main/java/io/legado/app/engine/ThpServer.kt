@@ -19,6 +19,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedWriter
+import java.io.OutputStreamWriter
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -115,6 +119,31 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
 
         /** `full=1` 时使用的预算：直接顶到上限，语义是「不设时间上限，扫完为止」。 */
         private const val SEARCH_BUDGET_FULL_SEC = SEARCH_BUDGET_MAX_SEC
+
+        /**
+         * `/thp/search` 支持的搜索模式（`mode=` 参数，2026-10-03）。
+         * 见 [search] 里对三种模式的语义说明。传不认识的值一律回落 fuzzy（不报错）。
+         */
+        private val SEARCH_MODES = setOf("fuzzy", "exact", "deep")
+
+        /**
+         * 流式响应的最大时长(秒)。**这不是「搜索时长上限」**，而是**单个 HTTP 流的时长**：
+         * 到时流会正常收尾（最后一行 done:true, truncated 保留真实值），
+         * 调用方见到 truncated=true 就**立刻再开一个流**从断点继续 —— 对用户而言是无缝的。
+         *
+         * 为什么要设：一个 HTTP 连接不能无限挂着（中间代理/系统都会掐），
+         * 而且**用户按停时前端就是直接断开这个连接**，引擎侧写管道失败即自然收手。
+         * 两条路径都干净，所以宁可分段续流，也不做「一个连接挂半小时」。
+         */
+        private const val STREAM_MAX_SEC = 120L
+
+        /**
+         * 流式响应的管道缓冲区大小。256KB —— 一行（约 40 条 × 250B ≈ 10KB）
+         * 连写 25 行都撑不满，所以「调用方读得慢」不会把搜索线程顶死；
+         * 反过来若调用方已断开，写满缓冲后 DeepSweep 会停在 write 上，
+         * 由于是 daemon 线程且 STREAM_MAX_SEC 到时自然结束，不会泄漏。
+         */
+        private const val STREAM_PIPE_BUF = 256 * 1024
 
         /**
          * 搜索结果短期缓存 + **深搜状态机**。★这是「加载更多/瀑布流」成立的前提：
@@ -353,7 +382,12 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 }
 
                 // ── 兼容端点(旧草稿) ──
-                uri == "/thp/search" -> activationBlock(true) ?: search(q)
+                // ★stream=1 走 NDJSON 流式（结果边扫边推，见 [searchStream]）；
+                //   不传时是原来的「一轮扫完再返回」，老调用方行为完全不变。
+                uri == "/thp/search" -> activationBlock(true) ?: run {
+                    val streaming = q["stream"] == "1" || q["stream"] == "true"
+                    if (streaming) searchStream(q) else search(q)
+                }
                 uri == "/thp/chapters" -> activationBlock(true) ?: chapters(q)
                 uri == "/thp/content" -> activationBlock(true) ?: legacyContent(q)
                 uri == "/thp/discover" -> activationBlock(true) ?: discover(q)
@@ -594,15 +628,28 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val wantType = if (all) -1 else (MODULES[type] ?: 0)
         val page = (parms["page"]?.toIntOrNull() ?: 1).coerceAtLeast(1)
         val limit = (parms["limit"]?.toIntOrNull() ?: DEFAULT_LIMIT).coerceIn(1, MAX_LIMIT)
+        // ★2026-10-03：搜索模式（用户诉求「让引擎知道我们是想精确搜还是模糊搜」）。
+        //   引擎上游本来就同时具备这两种语义，只是过去没有入口让调用方表达 —— 现在补上。
+        //   · fuzzy（默认）—— 源站返回什么就是什么（模糊/关联），行为与 1.11.x 完全一致
+        //   · exact      —— 引擎侧再过滤一道：书名或作者必须**包含**关键词才算命中。
+        //                   源站大多做的是模糊匹配，所以「搜『人』出来一堆不相干的」
+        //                   正是这个模式要治的；同时它天然更快（够量即停）。
+        //   · deep       —— 不给时间预算设限（等同 full=1），配 stream=1 边扫边推，
+        //                   一直推到所有源见底 —— 这就是「一口气搜十几万条」的姿势。
+        val mode = (parms["mode"] ?: parms["search"] ?: "fuzzy").lowercase()
+            .let { if (it in SEARCH_MODES) it else "fuzzy" }
+        val exact = mode == "exact"
         // ★ full=1：调用方明确要「搜全」——直接顶到预算上限，忽略 budget。
         //   语义是「不设时间上限，扫完为止」，配合深搜累积，可分多次一路搜到底。
-        val wantFull = parms["full"] == "1" || parms["full"] == "true"
+        val wantFull = mode == "deep" || parms["full"] == "1" || parms["full"] == "true"
         val budgetSec = (if (wantFull) SEARCH_BUDGET_FULL_SEC
         else parms["budget"]?.toLongOrNull() ?: SEARCH_BUDGET_DEFAULT_SEC)
             .coerceIn(SEARCH_BUDGET_MIN_SEC, SEARCH_BUDGET_MAX_SEC)
         val restart = parms["restart"] == "1" || parms["restart"] == "true"
 
-        val cacheKey = "$type|$q"
+        // ★ mode 必须进缓存键：exact 过滤后的集合与 fuzzy 不是同一份结果，
+        //   共用缓存会让用户切一次模式就看到上一模式的残留。
+        val cacheKey = "$type|$mode|$q"
         val lock = SWEEP_LOCKS.computeIfAbsent(cacheKey) { Any() }
         synchronized(lock) {
             val now = System.currentTimeMillis()
@@ -628,7 +675,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             }
             val from = ((page - 1).toLong() * limit).toInt()
             // 深搜补扫：存量不够这一刀就在预算内逐块扫；够了就直接切片（翻页不重扫）。
-            deepSweep(c, q, wantType, budgetSec, from, limit)
+            deepSweep(c, q, wantType, budgetSec, from, limit, exact)
 
             val full = c.items
             val n = full.length()
@@ -645,9 +692,178 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
                 .put("hasMore", from + limit < n || !c.exhausted)
                 .put("truncated", !c.exhausted)
                 .put("budgetSec", c.budgetSec)
+                .put("mode", mode)
                 .put("scannedSources", c.sweptSources)
                 .put("totalSources", c.totalSources))
         }
+    }
+
+    /**
+     * ★流式搜索（2026-10-03，用户诉求「应该是流式的，而不是一口气突然拉一下子」）。
+     *
+     *   GET /thp/search?type=all&q=人&mode=fuzzy&stream=1
+     *
+     * 与 [search] 的区别**只在交付方式**：不传 stream 时是「在预算内扫完一轮、一次性返回」，
+     * 调用方只能干等（实测单轮 12~22s，用户看到的就是「卡半天然后突然冒出一堆」）。
+     * 传 stream=1 时返回 `application/x-ndjson` 的分块响应，**每扫完一块就立刻推一行**，
+     * 调用方边收边渲染 —— 首条结果通常在 1s 内就到，剩下的在滚。
+     *
+     * 行协议（每行一个 JSON，形状与兼容端点一致，便于前端复用同一套解析）：
+     * ```json
+     * {"object":"list","type":"start","mode":"fuzzy","q":"人","items":[],"data":{"items":[]},
+     *  "total":0,"scannedSources":0,"totalSources":3695,"hasMore":true,"truncated":true}
+     * {"object":"list","items":[…新增条目…],"data":{"items":[…]},"chunk":1,
+     *  "total":40,"scannedSources":128,"totalSources":3695,"hasMore":true,"truncated":true}
+     * …
+     * {"object":"list","items":[…],"data":{"items":[…]},"chunk":9,"done":true,
+     *  "total":1832,"scannedSources":3695,"totalSources":3695,"hasMore":false,"truncated":false}
+     * ```
+     *
+     * 三条要点：
+     *  1. `items` 是**增量**（本块新扫到的），不是切片 —— 调用方按 id 去重后追加即可。
+     *  2. 流会因两种原因结束：`exhausted`（真搜完，`truncated:false`）或到达
+     *     [STREAM_MAX_SEC]（`truncated:true`）。后者调用方**立刻再开一个流**接着扫，
+     *     对用户是无缝的 —— 语义上仍然是「不问过我不停」。
+     *  3. **用户按停 = 断开连接**。引擎侧写管道会失败，循环随即收手（不残留后台线程）。
+     */
+    private fun searchStream(parms: Map<String, String>): Response {
+        val q = parms["q"]?.trim()
+        if (q.isNullOrEmpty()) return json(400, err("invalid_request", "缺参数 q"))
+        val type = parms["type"] ?: "novel"
+        val all = type == "all"
+        if (!all && !EngineProfile.allowsModule(type)) {
+            // 形状与 [search] 的同类分支逐字一致：这是「空结果」不是「流」，调用方按普通响应读。
+            return json(200, JSONObject()
+                .put("object", "list")
+                .put("items", JSONArray())
+                .put("data", JSONObject().put("items", JSONArray()))
+                .put("page", 1).put("limit", DEFAULT_LIMIT).put("total", 0)
+                .put("hasMore", false).put("truncated", false).put("budgetSec", 0)
+                .put("scannedSources", 0).put("totalSources", 0)
+                .put("note", "${EngineProfile.displayName} 不提供 $type 模块"))
+        }
+        val wantType = if (all) -1 else (MODULES[type] ?: 0)
+        val mode = (parms["mode"] ?: "fuzzy").lowercase()
+            .let { if (it in SEARCH_MODES) it else "fuzzy" }
+        val exact = mode == "exact"
+        val wantFull = mode == "deep" || parms["full"] == "1" || parms["full"] == "true"
+        val sliceSec = (parms["budget"]?.toLongOrNull()
+            ?: if (wantFull) SWEEP_CHUNK_BUDGET_SEC else SEARCH_BUDGET_DEFAULT_SEC)
+            .coerceIn(SEARCH_BUDGET_MIN_SEC, SEARCH_BUDGET_MAX_SEC)
+        val restart = parms["restart"] == "1" || parms["restart"] == "true"
+        val cacheKey = "$type|$mode|$q"
+        val lock = SWEEP_LOCKS.computeIfAbsent(cacheKey) { Any() }
+
+        val pos = PipedOutputStream()
+        val pis = PipedInputStream(pos, STREAM_PIPE_BUF)
+        // 独立线程跑深搜 —— NanoHTTPD 在**当前线程**读管道往 socket 写，
+        // 所以搜索必须让出线程，否则自己写自己读死锁。
+        // 用显式 Runnable（不用 Thread { } 的 SAM 形式）：此处要带线程名，写成
+        // Thread({…}, "name") 的类型推断在跨 Kotlin 版本时不够稳，显式声明最保险。
+        val job = Runnable {
+            val w = BufferedWriter(OutputStreamWriter(pos, Charsets.UTF_8))
+            try {
+                val t0 = System.currentTimeMillis()
+                val deadline = t0 + STREAM_MAX_SEC * 1000
+                // ── 首行：立刻把「有多少源要扫 / 什么模式」告诉调用方，
+                //    界面可以马上画出 0/3695 的进度骨架，而不是空白转圈。
+                writeStreamLine(w, JSONObject()
+                    .put("object", "list").put("type", "start")
+                    .put("mode", mode).put("q", q)
+                    .put("items", JSONArray())
+                    .put("data", JSONObject().put("items", JSONArray()))
+                    .put("page", 1).put("limit", DEFAULT_LIMIT)
+                    .put("total", 0).put("scannedSources", 0).put("totalSources", 0)
+                    .put("hasMore", true).put("truncated", true).put("budgetSec", sliceSec))
+
+                var chunkNo = 0
+                var totalSrc = 0
+                var finished = false
+                while (!finished && System.currentTimeMillis() < deadline) {
+                    var delta: JSONArray
+                    var done: Boolean
+                    var scanned: Int
+                    var total: Int
+                    synchronized(lock) {
+                        val now = System.currentTimeMillis()
+                        val existing =
+                            SEARCH_CACHE[cacheKey]?.takeIf { now - it.createdAt <= SEARCH_CACHE_TTL_MS }
+                        val c: SearchCache
+                        if (existing == null || (restart && chunkNo == 0)) {
+                            c = SearchCache(sliceSec)
+                            SEARCH_CACHE[cacheKey] = c
+                        } else {
+                            c = existing
+                        }
+                        val before = c.items.length()
+                        // ★ 每轮只推进**一块**：这样每块都能立刻推给调用方，
+                        //   而不是像 [search] 那样在预算内连扫多块、最后一次性返回。
+                        //   ignoreReserve=true —— 流式的语义是「一路搜到底」，
+                        //   不受「存量够这一刀就收手」的翻页优化影响；
+                        //   传 limit=DEFAULT_LIMIT 只为算 reserve（此处已被忽略），
+                        //   不要传 Int.MAX_VALUE：limit*2 会溢出成负数。
+                        deepSweep(c, q, wantType, sliceSec, 0, DEFAULT_LIMIT, exact,
+                            maxChunks = 1, ignoreReserve = true)
+                        chunkNo++
+                        total = c.items.length()
+                        delta = JSONArray()
+                        for (i in before until total) delta.put(c.items.get(i))
+                        scanned = c.sweptSources
+                        totalSrc = c.totalSources
+                        done = c.exhausted
+                    }
+                    // ★ 写管道放在锁**外**：调用方读得慢（或已断开）时，
+                    //   阻塞的是这条流的线程，不会把别人的搜索卡在同一把锁上。
+                    writeStreamLine(w, JSONObject()
+                        .put("object", "list")
+                        .put("items", delta)
+                        .put("data", JSONObject().put("items", delta))
+                        .put("page", 1).put("limit", DEFAULT_LIMIT)
+                        .put("chunk", chunkNo)
+                        .put("mode", mode)
+                        .put("total", total).put("scannedSources", scanned)
+                        .put("totalSources", totalSrc)
+                        .put("hasMore", !done).put("truncated", !done)
+                        .put("budgetSec", sliceSec)
+                        .put("done", done)
+                        .put("elapsedMs", System.currentTimeMillis() - t0))
+                    finished = done
+                }
+                // 到时仍未搜完 → 收尾行（truncated=true，调用方据此立刻续流，进度不丢）
+                if (!finished) {
+                    writeStreamLine(w, JSONObject()
+                        .put("object", "list")
+                        .put("items", JSONArray())
+                        .put("data", JSONObject().put("items", JSONArray()))
+                        .put("chunk", chunkNo).put("mode", mode)
+                        .put("done", false).put("hasMore", true).put("truncated", true)
+                        .put("streamTimeout", true)
+                        .put("elapsedMs", System.currentTimeMillis() - t0))
+                }
+            } catch (t: Throwable) {
+                // ★ 这里最常发生的就是「用户按了停止」——调用方断开连接，
+                //   管道另一端没了，写就抛 IOException。这是**正常收尾**，不是故障，
+                //   所以不记 error 日志、不上报，线程直接结束即可。
+            } finally {
+                runCatching { w.flush() }
+                runCatching { w.close() }
+                runCatching { pos.close() }
+            }
+        }
+        Thread(job, "thp-stream-$type").apply { isDaemon = true }.start()
+
+        val r = newChunkedResponse(Response.Status.OK, "application/x-ndjson; charset=utf-8", pis)
+        r.addHeader("Cache-Control", "no-cache, no-transform")
+        // 让前置的反向代理（若用户前面挂了 nginx/CF）不要把这行流缓存成整块
+        r.addHeader("X-Accel-Buffering", "no")
+        return r
+    }
+
+    /** 写一行 NDJSON 并立刻 flush —— 不 flush 的话分块响应会攒在缓冲区里，等于没流式。 */
+    private fun writeStreamLine(w: BufferedWriter, o: JSONObject) {
+        w.write(o.toString())
+        w.write("\n")
+        w.flush()
     }
 
     /**
@@ -671,13 +887,26 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         budgetSec: Long,
         from: Int,
         limit: Int,
+        exact: Boolean = false,
+        /**
+         * 最多推进几块就返回。默认不限（[search] 的「预算内连扫多块」行为不变）；
+         * [searchStream] 传 1 —— 每块扫完就推一行，这才是流式。
+         */
+        maxChunks: Int = Int.MAX_VALUE,
+        /**
+         * 忽略「存量够这一刀就收手」的翻页优化。默认 false（[search] 行为不变）；
+         * [searchStream] 传 true —— 流式的目标是一路扫到底，不是凑够一页就走。
+         */
+        ignoreReserve: Boolean = false,
     ) {
         val deadline = System.currentTimeMillis() + budgetSec * 1000
         val reserve = limit * 2
+        var chunks = 0
         while (!cache.exhausted) {
+            if (chunks >= maxChunks) break
             val now = System.currentTimeMillis()
             if (now >= deadline) break
-            if (cache.items.length() - from >= reserve) break   // 存量已够这一刀，别让请求陪着扫
+            if (!ignoreReserve && cache.items.length() - from >= reserve) break   // 存量已够这一刀，别让请求陪着扫
             val all = SearchScope(AppConfig.searchScope).getBookSourceParts()
             cache.totalSources = all.size
             if (cache.sweepOffset >= all.size) {
@@ -708,7 +937,8 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
             cache.sweepOffset = chunkStart + progressed
             cache.sweptSources += r.scannedSources
             if (r.roundHasItems) cache.pageHits = true
-            appendSweep(cache, r.items, wantType)
+            appendSweep(cache, r.items, wantType, exact, q)
+            chunks++   // 真推进了一块（源内翻页的 continue 不算），供 [searchStream] 的每轮一块计数
             // ★ 零推进保险丝 —— **必须跨请求持久化**（见 SearchCache.chunkAttempts）：
             //   整块都是「连得上却不响应」的死源时 progressed 恒为 0。旧实现把计数器放局部变量，
             //   而这一块会把剩余预算吃光、下轮开头 `now >= deadline` 先 break，
@@ -739,10 +969,26 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
      * 已翻过的页永远原位不动，翻页切片不会因补扫而错位（旧版「新前旧后」会让
      * 用户点加载更多时看到列表跳序，2026-10-02 改为保序追加）。
      */
-    private fun appendSweep(cache: SearchCache, raw: List<Map<String, Any?>>, wantType: Int) {
+    private fun appendSweep(
+        cache: SearchCache,
+        raw: List<Map<String, Any?>>,
+        wantType: Int,
+        exact: Boolean = false,
+        keyword: String = "",
+    ) {
         for (b in raw) {
             val st = (b["sourceType"] as? Int) ?: 0
             if (wantType >= 0 && st != wantType) continue
+            // ★ mode=exact：源站大多做模糊匹配，「搜『人』出来一堆不相干的」就是它。
+            //   这里再收一道 —— 书名或作者必须真的含这个关键词。放在**入缓存之前**，
+            //   保证累积集合里一条模糊命中都不混进来（放在切片处过滤会让 total 虚高）。
+            if (exact && keyword.isNotEmpty()) {
+                val nm = (b["name"] as? String) ?: ""
+                val au = (b["author"] as? String) ?: ""
+                if (!nm.contains(keyword, ignoreCase = true) &&
+                    !au.contains(keyword, ignoreCase = true)
+                ) continue
+            }
             val bookUrl = (b["bookUrl"] as? String) ?: continue
             if (!isUsableBookUrl(bookUrl)) continue
             if (isErrorPageName(b["name"] as? String)) continue
