@@ -68,7 +68,14 @@ def name = "thirdhub-engine-novel"
 //   本版：书不在库立刻返回并说明；缺章节先补建目录再取；`ContentEmptyException`
 //   单独标成 `[SOURCE_EMPTY]`（前端据此显示来源名 + 给「换源重搜」出口）。
 //   versionCode 由版本号推导 → 11300。
-def version = "1.13.0"
+// ★1.13.1（2026-10-03，追补）：把「章节不存在」这个**误导性**提示分家。
+//   实测：请求一本引擎库里没有的书，1.13.0 虽已不空等 30 秒（实测 30ms 返回），
+//   但报的是 404「章节不存在」—— 而真实原因是「这本书还没进引擎」。
+//   两者后果完全不同：前者让用户以为这本书缺章节，后者应该去重新搜索。
+//   新增 chapterMissingResponse()：书不在库 → [NEED_REGISTRATION]（并附该做什么），
+//   书在但真没这一章 → 才是「章节不存在」。chapters 端点同样处理。
+//   versionCode 由版本号推导 → 11301。
+def version = "1.13.1"
 // versionCode 由版本号推导(1.5.0 → 10500), 保证单调递增、覆盖安装不被降级拦截。
 // 以前依赖 git rev-list 的写法在无 git 历史的源码包里会静默回落, 故改为确定性推导。
 def versionCodeValue = {

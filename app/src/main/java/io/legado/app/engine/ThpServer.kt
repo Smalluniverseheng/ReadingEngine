@@ -525,7 +525,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val chapterRef = get("chapterId") ?: get("chapter")
         if (chapterRef.isNullOrBlank()) return json(400, errSpec("INVALID_REQUEST", "缺参数 chapterId"))
         val index = resolveChapterIndex(id, chapterRef)
-            ?: return json(404, errSpec("NOT_FOUND", "章节不存在"))
+            ?: return chapterMissingResponse(id, legacy = false)
 
         return when (module) {
             "novel" -> {
@@ -1011,10 +1011,34 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         cache.createdAt = System.currentTimeMillis()   // 活跃搜索别被 TTL 半路清掉
     }
 
+    /**
+     * 解析章节引用失败时的**正确归因**。
+     *
+     * ★2026-10-03：原来无论什么原因都回一句「章节不存在」，实测抓到两种完全不同的情况：
+     *   ① 书**根本没在引擎库里**（引擎直连的常见情形：从 App 书架/历史进来的书，
+     *      引擎这边没登记，`ensureBook` 又在 searchCache 里找不到它）
+     *   ② 书在、但确实没有这一章
+     * 两者都报「章节不存在」，用户会以为是"这本书缺这一章"，而真实原因是
+     * 「这本书还没进引擎」—— 前端据此**给不出正确的出口**（提示换源毫无意义）。
+     * 所以这里先分清 ① 与 ②，① 单独用 [NEED_REGISTRATION] 标记。
+     */
+    private fun chapterMissingResponse(bookUrl: String, legacy: Boolean): Response {
+        val known = runCatching { appDb.bookDao.getBook(bookUrl) != null }.getOrDefault(false)
+        return if (known) {
+            if (legacy) json(404, err("not_found", "章节不存在"))
+            else json(404, errSpec("NOT_FOUND", "章节不存在"))
+        } else {
+            val msg = "[NEED_REGISTRATION] 这本书还没登记到引擎（引擎直连不会自动加书架），" +
+                "请在 App 内重新搜索后打开"
+            if (legacy) json(404, err("need_registration", msg))
+            else json(404, errSpec("NEED_REGISTRATION", msg))
+        }
+    }
+
     private fun chapters(parms: Map<String, String>): Response {
         val id = parms["id"]
         if (id.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id"))
-        val list = loadToc(id) ?: return json(502, err("source_error", "目录获取失败"))
+        val list = loadToc(id) ?: return chapterMissingResponse(id, legacy = true)
         val items = JSONArray()
         for (c in list) {
             items.put(JSONObject()
@@ -1034,7 +1058,7 @@ class ThpServer(port: Int = 1234) : NanoHTTPD(port) {
         val chapter = parms["chapterId"] ?: parms["chapter"]
         if (id.isNullOrBlank() || chapter.isNullOrBlank()) return json(400, err("invalid_request", "缺参数 id/chapterId"))
         val index = resolveChapterIndex(id, chapter)
-            ?: return json(404, err("not_found", "章节不存在"))
+            ?: return chapterMissingResponse(id, legacy = true)
         val rd = BookController.getBookContent(
             mapOf("url" to listOf(id), "index" to listOf(index.toString())))
         if (!rd.isSuccess) return json(502, err("source_error", rd.errorMsg ?: "正文获取失败"))
